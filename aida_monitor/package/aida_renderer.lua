@@ -648,8 +648,14 @@ function Renderer:update_text_view(text_view, text)
   if not text_view then return false end
   text_view.text = tostring(text or "")
   if text_view.vector then
-    return self:render_canvas_text(text_view.object, 0, 0, text_view.width, text_view.height,
-      text_view.text, text_view.text_style, text_view.background, false, true)
+    -- Standalone text canvases are not part of a graph/arc frame. Commit their
+    -- direct RGB565 rewrite explicitly so LVGL invalidates the canvas object.
+    local explicit = canvas_begin(text_view.object)
+    local rendered = self:render_canvas_text(text_view.object, 0, 0,
+      text_view.width, text_view.height, text_view.text,
+      text_view.text_style, text_view.background, false, true)
+    canvas_end(text_view.object, explicit)
+    return rendered
   end
   if text_view.object then call(lv_label_set_text, text_view.object, text_view.text) return true end
   return false

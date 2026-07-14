@@ -96,6 +96,14 @@ lv_canvas_draw_rect = function() end
 lv_canvas_draw_line = function() end
 lv_canvas_draw_text = function() end
 lv_canvas_draw_arc = function() end
+local canvas_frame_begin_count = 0
+local canvas_frame_end_count = 0
+lv_canvas_frame_begin = function()
+  canvas_frame_begin_count = canvas_frame_begin_count + 1
+end
+lv_canvas_frame_end = function()
+  canvas_frame_end_count = canvas_frame_end_count + 1
+end
 lv_canvas_blit_rgb565 = function(_, _, _, width, height, data)
   assert(#data == width * height * 2, "vector RGB565 buffer")
 end
@@ -128,6 +136,8 @@ local renderer = Renderer.new({ config = { history_points = 49,
   vector_font = vector_font })
 renderer:build()
 assert(vector_render_count > 0, "vector text rendered")
+assert(canvas_frame_begin_count > 0 and canvas_frame_end_count == canvas_frame_begin_count,
+  "standalone vector canvases commit frames")
 renderer:apply_sample(sample)
 assert(renderer.active_page == 1, "renderer first page")
 assert(#renderer.views.Gph4.item.history == 1, "graph history")
