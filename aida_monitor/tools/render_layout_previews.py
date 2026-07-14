@@ -396,11 +396,19 @@ def vertical_gradient(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int],
         draw.line((x1, y, x2, y), fill=mixed)
 
 
-def graph_range(item: Item) -> tuple[float, float]:
+def graph_spacing(params: dict) -> int:
+    if params["type"] == "HG":
+        return max(1, params["thick"]) + max(0, params["step"])
+    return max(0, params["step"]) + 1
+
+
+def graph_range(item: Item, drawable_width: int) -> tuple[float, float]:
     params, history = item.data["params"], item.data["history"]
     low, high = params["min"], params["max"]
     if params["autoscale"] and history:
-        low, high = min(history), max(history)
+        visible_count = min(len(history), (max(1, drawable_width) - 1) // graph_spacing(params) + 1)
+        visible = history[-visible_count:]
+        low, high = min(visible), max(visible)
         if params["base100"]:
             low, high = round(low * .009) * 100, round(high * .011) * 100
         else:
@@ -417,34 +425,31 @@ def render_graph(draw: ImageDraw.ImageDraw, item: Item, page_background: str) ->
     x, y, w, h = g["x"], g["y"], g["w"], g["h"]
     draw.rectangle((x, y, x + w - 1, y + h - 1), fill=p["background"] if p["show_background"] else page_background)
     left, top, right, bottom = x, y, x + w - 1, y + h - 1
+    drawable_width, drawable_height = w, h
     if p["show_frame"]:
         left, top, right, bottom = left + 1, top + 1, right - 1, bottom - 1
-    scale_width = min(28, max(18, p["font_size"] * 3)) if p["show_scale"] else 0
-    if p["show_scale"]:
-        if p["right_align"]:
-            right -= scale_width
-        else:
-            left += scale_width
-    low, high = graph_range(item)
+        drawable_width, drawable_height = max(1, w - 2), max(1, h - 2)
+    low, high = graph_range(item, drawable_width)
     if p["show_grid"]:
         density = max(2, p["grid_density"])
-        gx = left + item.data.get("grid_offset", 0) % density
-        while gx <= right:
-            draw.line((gx, top, gx, bottom), fill=p["grid"])
-            gx += density
-        gy = top
-        while gy <= bottom:
-            draw.line((left, gy, right, gy), fill=p["grid"])
-            gy += density
+        offset = item.data.get("grid_offset", 0) % density
+        for index in range(drawable_width):
+            if index % density == offset:
+                draw.line((left + index, top, left + index, bottom), fill=p["grid"])
+        for index in range(drawable_height - 1, -1, -1):
+            if index % density == 0 and (not p["show_frame"] or index > 0):
+                gy = bottom - index
+                draw.line((left, gy, right, gy), fill=p["grid"])
     history = item.data["history"][-item.data.get("max_points", 49):]
-    plot_h = max(1, bottom - top)
-    points = [(right - (len(history) - 1 - index) * max(1, p["step"]),
-               bottom - round(max(0, min(1, (value - low) / (high - low))) * plot_h))
-              for index, value in enumerate(history)]
+    spacing = graph_spacing(p)
+    points = [(right - offset * spacing,
+               bottom - int(max(0, min(1, (history[-1 - offset] - low) / (high - low))) * drawable_height))
+              for offset in range(len(history))]
     points = [(px, py) for px, py in points if px >= left]
     if p["type"] == "HG":
         for px, py in points:
-            draw.rectangle((px, py, px + max(1, p["step"] - 1), bottom), fill=p["graph"])
+            thick = max(1, p["thick"])
+            draw.rectangle((max(left, px - (thick - 1)), max(top, py), px, bottom), fill=p["graph"])
     elif points:
         if p["type"] == "AG" and len(points) > 1:
             overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -458,9 +463,14 @@ def render_graph(draw: ImageDraw.ImageDraw, item: Item, page_background: str) ->
                  "color": p["font_color"], "align": "left" if p["right_align"] else "right",
                  "bold": "bold" in p.get("font_weight", "").lower(),
                  "italic": "italic" in p.get("font_style", "").lower()}
-        tx = right + 2 if p["right_align"] else x
-        draw_text(draw, (tx, top), scale_width - 2, style, str(round(high)))
-        draw_text(draw, (tx, max(top, bottom - p["font_size"])), scale_width - 2, style, str(round(low)))
+        high_text, low_text = str(round(high)), str(round(low))
+        fnt = font(style["family"], style["size"], style["bold"], style["italic"])
+        high_width = max(1, round(draw.textlength(high_text, font=fnt)))
+        low_width = max(1, round(draw.textlength(low_text, font=fnt)))
+        high_x = right - high_width if p["right_align"] else left + 1
+        low_x = right - low_width if p["right_align"] else left + 1
+        draw_text(draw, (high_x, top + 1), high_width, style, high_text)
+        draw_text(draw, (low_x, max(top, bottom - round(p["font_size"] * 1.52) + 1)), low_width, style, low_text)
     if p["show_frame"]:
         draw.rectangle((x, y, x + w - 1, y + h - 1), outline=p["frame"])
 
@@ -471,19 +481,28 @@ def render_arc(draw: ImageDraw.ImageDraw, item: Item, page_background: str) -> N
         return
     x, y, w, h = g["x"], g["y"], g["w"], g["h"]
     draw.rectangle((x, y, x + w - 1, y + h - 1), fill=page_background)
-    diameter = min(w, h) - 2
-    box = (x + (w - diameter) // 2, y + (h - diameter) // 2,
-           x + (w + diameter) // 2, y + (h + diameter) // 2)
-    thickness = max(1, min(p["thickness"], diameter // 2))
+    value = str(item.data.get("display_text", ""))
+    if not value:
+        return
+    thickness = max(1, min(p["thickness"], w // 2))
+    cx, cy = x + w / 2, y + h / 2
+    radius = max(.5, (w - thickness) / 2)
+    box = (round(cx - radius), round(cy - radius), round(cx + radius), round(cy + radius))
     if p["fill"]:
-        inset = thickness
-        draw.ellipse((box[0] + inset, box[1] + inset, box[2] - inset, box[3] - inset), fill=p["fill_color"])
-    draw.arc(box, 0, 359, fill=item.data.get("background_color", "#202020"), width=thickness)
+        fill_radius = max(0, w / 2 - thickness / 2)
+        draw.ellipse((round(cx - fill_radius), round(cy - fill_radius),
+                      round(cx + fill_radius), round(cy + fill_radius)), fill=p["fill_color"])
     start = p["start"]
-    draw.arc(box, start, start + max(0, min(100, item.data.get("percent", 0))) * 3.6,
-             fill=item.data.get("active_color", "#00FF00"), width=thickness)
+    span = max(0, min(100, item.data.get("percent", 0))) * 3.6
+    if span <= 0:
+        draw.arc(box, 0, 360, fill=item.data.get("background_color", "#202020"), width=thickness)
+    elif span < 360:
+        draw.arc(box, start + span - 90, start + 360 - 90,
+                 fill=item.data.get("background_color", "#202020"), width=thickness)
+    if span > 0:
+        draw.arc(box, start - 90, start + span - 90,
+                 fill=item.data.get("active_color", "#00FF00"), width=thickness)
     if p["show_text"]:
-        value = str(item.data.get("display_text", ""))
         style = {"family": "AIDA Noto Sans SC", "size": p["font_size"],
                  "color": p["font_color"], "align": "center",
                  "bold": "bold" in p.get("font_weight", "").lower(),

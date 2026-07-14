@@ -113,7 +113,9 @@ local function vector_text_height(text_style, available)
   local size = tonumber(text_style and text_style.font and text_style.font.size) or 12
   local shadow = text_style and text_style.shadow or nil
   local shadow_pad = shadow and math.max(0, (tonumber(shadow.y) or 0) + (tonumber(shadow.blur) or 0)) or 0
-  local height = math.ceil(size * 1.28) + math.max(2, shadow_pad)
+  -- CSS font-size describes the em square. Noto Sans SC needs roughly 1.45 em
+  -- for its ascent/descent, plus a little room for decorations and shadows.
+  local height = math.ceil(size * 1.52) + math.max(2, shadow_pad)
   return math.max(1, math.min(tonumber(available) or height, height))
 end
 
@@ -189,15 +191,32 @@ local function draw_text(canvas, x, y, width, text, color, size, align, opacity,
   end
 end
 
-local function graph_range(item)
+local function graph_spacing(params)
+  params = params or {}
+  if params.graph_type == "HG" then
+    return math.max(1, tonumber(params.thick) or 1) + math.max(0, tonumber(params.step) or 1)
+  end
+  return math.max(0, tonumber(params.step) or 1) + 1
+end
+
+local function graph_range(item, drawable_width)
   local p = item.params or {}
+  if drawable_width == nil then
+    drawable_width = tonumber(item.geometry and item.geometry.w) or 1
+    if p.show_frame then drawable_width = math.max(1, drawable_width - 2) end
+  end
   local minimum = tonumber(p.min_value) or 0
   local maximum = tonumber(p.max_value) or 100
   if p.autoscale and #item.history > 0 then
-    minimum, maximum = item.history[1], item.history[1]
-    for i = 2, #item.history do
-      minimum = math.min(minimum, item.history[i])
-      maximum = math.max(maximum, item.history[i])
+    -- AIDA64 only autoscales against samples that fit in the current canvas.
+    local visible = math.min(#item.history,
+      math.floor((math.max(1, tonumber(drawable_width) or 1) - 1) / graph_spacing(p)) + 1)
+    local newest = #item.history
+    minimum, maximum = item.history[newest], item.history[newest]
+    for offset = 1, visible - 1 do
+      local value = item.history[newest - offset]
+      minimum = math.min(minimum, value)
+      maximum = math.max(maximum, value)
     end
     if p.base_100 then
       minimum = math.floor(minimum * 0.009 + 0.5) * 100
@@ -751,76 +770,87 @@ function Renderer:software_draw_graph(item)
       p.background or self.layout.background or 0, 255)
   end
   local left, top, right, bottom = 0, 0, width - 1, height - 1
-  if p.show_frame then left, top, right, bottom = 1, 1, width - 2, height - 2 end
-  local scale_width = p.show_scale and math.min(28, math.max(18, (p.font_size or 8) * 3)) or 0
-  if p.show_scale then
-    if p.right_align then right = right - scale_width else left = left + scale_width end
+  local drawable_width, drawable_height = width, height
+  if p.show_frame then
+    left, top, right, bottom = 1, 1, width - 2, height - 2
+    drawable_width, drawable_height = math.max(1, width - 2), math.max(1, height - 2)
   end
-  local plot_h = math.max(1, bottom - top)
-  local minimum, maximum = graph_range(item)
+  local minimum, maximum = graph_range(item, drawable_width)
   if p.show_grid then
     local density = math.max(2, tonumber(p.grid_density) or 10)
-    local gx = left + ((tonumber(item.grid_offset) or 0) % density)
-    while gx <= right do
-      self.vector_font:surface_line(self.software_surface, ox + gx, oy + top,
-        ox + gx, oy + bottom, p.grid_color or 0x333333, 255, 1)
-      gx = gx + density
+    local offset = (tonumber(item.grid_offset) or 0) % density
+    for index = 0, drawable_width - 1 do
+      if index % density == offset then
+        self.vector_font:surface_line(self.software_surface, ox + left + index, oy + top,
+          ox + left + index, oy + bottom, p.grid_color or 0x333333, 255, 1)
+      end
     end
-    local gy = top
-    while gy <= bottom do
-      self.vector_font:surface_line(self.software_surface, ox + left, oy + gy,
-        ox + right, oy + gy, p.grid_color or 0x333333, 255, 1)
-      gy = gy + density
+    for index = drawable_height - 1, 0, -1 do
+      if index % density == 0 and (not p.show_frame or index > 0) then
+        local gy = bottom - index
+        self.vector_font:surface_line(self.software_surface, ox + left, oy + gy,
+          ox + right, oy + gy, p.grid_color or 0x333333, 255, 1)
+      end
     end
   end
   local history = item.history or {}
   local count = #history
-  local step = math.max(1, tonumber(p.step) or 1)
-  local function point(index)
-    local px = right - (count - index) * step
+  local spacing = graph_spacing(p)
+  local function point(offset)
+    local index = count - offset
+    local px = right - offset * spacing
     local ratio = clamp((history[index] - minimum) / (maximum - minimum), 0, 1)
-    return px, bottom - ratio * plot_h
+    return px, bottom - math.floor(ratio * drawable_height)
   end
   if p.graph_type == "HG" then
-    for index = 1, count do
-      local px, py = point(index)
-      if px >= left then
-        self.vector_font:surface_rect(self.software_surface, ox + math.floor(px), oy + math.floor(py),
-          math.max(1, step - 1), math.max(1, math.floor(bottom - py + 1)),
+    local thick = math.max(1, tonumber(p.thick) or 1)
+    for offset = 0, count - 1 do
+      local px, py = point(offset)
+      if px < left then break end
+      local bar_left = px - (thick - 1)
+      if bar_left <= right then
+        self.vector_font:surface_rect(self.software_surface, ox + math.max(left, bar_left),
+          oy + math.max(top, py), math.min(thick, px - left + 1),
+          math.max(1, bottom - math.max(top, py) + 1),
           p.graph_color or 0xFFFFFF, 255)
       end
     end
   else
-    for index = 2, count do
-      local x1, y1 = point(index - 1)
-      local x2, y2 = point(index)
+    for offset = 0, count - 2 do
+      local x1, y1 = point(offset)
+      local x2, y2 = point(offset + 1)
+      if x1 < left then break end
       if x2 >= left then
         if p.graph_type == "AG" then
-          local start_x = math.floor(math.max(left, x1))
-          local end_x = math.floor(math.max(left, x2))
-          local span = math.max(1, x2 - x1)
+          local start_x = math.floor(math.max(left, x2))
+          local end_x = math.floor(x1)
+          local span = math.max(1, x1 - x2)
           for px = start_x, end_x do
-            local ratio = clamp((px - x1) / span, 0, 1)
-            local py = y1 + (y2 - y1) * ratio
+            local ratio = clamp((px - x2) / span, 0, 1)
+            local py = y2 + (y1 - y2) * ratio
             self.vector_font:surface_line(self.software_surface, ox + px, oy + py,
               ox + px, oy + bottom, p.graph_color or 0xFFFFFF, 84, 1)
           end
         end
-        self.vector_font:surface_line(self.software_surface, ox + math.max(left, x1), oy + y1,
+        self.vector_font:surface_line(self.software_surface, ox + x1, oy + y1,
           ox + x2, oy + y2, p.graph_color or 0xFFFFFF, 255, p.thick or 1)
       end
     end
   end
   if p.show_scale then
-    local text_x = p.right_align and (right + 2) or 0
-    local style = parameter_text_style(p, p.right_align and "left" or "right")
-    local text_width = math.max(1, scale_width - 2)
+    local style = parameter_text_style(p, "left")
+    local maximum_text = tostring(math.floor(maximum + 0.5))
+    local minimum_text = tostring(math.floor(minimum + 0.5))
+    local maximum_width = math.max(1, self.vector_font:measure(maximum_text, style) or 1)
+    local minimum_width = math.max(1, self.vector_font:measure(minimum_text, style) or 1)
     local text_height = math.min(height, vector_text_height(style, height))
-    self:surface_text(ox + text_x, oy + top, text_width, text_height,
-      tostring(math.floor(maximum + 0.5)), style)
+    local maximum_x = p.right_align and (right - maximum_width) or (left + 1)
+    local minimum_x = p.right_align and (right - minimum_width) or (left + 1)
+    self:surface_text(ox + maximum_x, oy + top + 1, maximum_width, text_height,
+      maximum_text, style)
     local bottom_y = math.max(top, bottom - text_height + 1)
-    self:surface_text(ox + text_x, oy + bottom_y, text_width,
-      math.min(text_height, height - bottom_y), tostring(math.floor(minimum + 0.5)), style)
+    self:surface_text(ox + minimum_x, oy + bottom_y, minimum_width,
+      math.min(text_height, height - bottom_y), minimum_text, style)
   end
   if p.show_frame then
     local color = p.frame_color or 0x666666
@@ -837,28 +867,35 @@ function Renderer:software_draw_arc(item)
   local g, p = item.geometry or {}, item.params or {}
   local ox, oy = tonumber(g.x) or 0, tonumber(g.y) or 0
   local width, height = math.max(1, tonumber(g.w) or 1), math.max(1, tonumber(g.h) or 1)
-  local radius = math.max(1, math.floor(math.min(width, height) / 2) - 1)
-  local thickness = clamp(p.thickness or 4, 1, radius)
-  local cx, cy = ox + math.floor(width / 2), oy + math.floor(height / 2)
-  if p.fill and radius > thickness then
-    local inner_radius = math.max(1, radius - thickness)
-    self.vector_font:surface_circle(self.software_surface, cx, cy, inner_radius,
-      p.fill_color or self.layout.background or 0, 255)
+  local display_text = tostring(item.display_text or "")
+  if display_text == "" then return end
+  local thickness = clamp(p.thickness or 4, 1, math.max(1, width / 2))
+  local cx, cy = ox + width / 2, oy + height / 2
+  local ring_radius = math.max(0.5, (width - thickness) / 2)
+  if p.fill then
+    self.vector_font:surface_circle(self.software_surface, cx, cy,
+      math.max(0, width / 2 - thickness / 2), p.fill_color or self.layout.background or 0, 255)
   end
-  self.vector_font:surface_arc(self.software_surface, cx, cy,
-    radius - math.floor(thickness / 2), 0, 359.5,
-    item.background_color or 0x202020, 255, thickness)
   local span = clamp(item.percent or 0, 0, 100) * 3.6
+  local start_angle = tonumber(p.start_angle) or 0
+  if span <= 0 then
+    self.vector_font:surface_arc(self.software_surface, cx, cy,
+      ring_radius, 0, 360, item.background_color or 0x202020, 255, thickness)
+  elseif span < 360 then
+    self.vector_font:surface_arc(self.software_surface, cx, cy,
+      ring_radius, start_angle + span, start_angle + 360,
+      item.background_color or 0x202020, 255, thickness)
+  end
   if span > 0 then
     self.vector_font:surface_arc(self.software_surface, cx, cy,
-      radius - math.floor(thickness / 2), p.start_angle or 0, (p.start_angle or 0) + span,
+      ring_radius, start_angle, start_angle + span,
       item.active_color or 0x00FF00, 255, thickness)
   end
   if p.show_text then
     local style = parameter_text_style(p, "center")
     local text_height = vector_text_height(style, height)
     self:surface_text(ox, oy + math.max(0, math.floor((height - text_height) / 2)),
-      width, text_height, item.display_text or "", style)
+      width, text_height, display_text, style)
   end
 end
 
@@ -1240,7 +1277,9 @@ function Renderer:apply_update(update, defer_render)
       history[#history + 1] = tonumber(update.value) or 0
       local max_points = item.max_points or self.config.history_points or 49
       while #history > max_points do table.remove(history, 1) end
-      item.grid_offset = (tonumber(item.grid_offset) or 0) - (item.params and item.params.step or 1)
+      local density = math.max(1, tonumber(item.params and item.params.grid_density) or 10)
+      item.grid_offset = (tonumber(item.grid_offset) or 0) - 1
+      if item.grid_offset < 0 then item.grid_offset = density - 1 end
     elseif update.kind == "arc" then
       item.percent = tonumber(update.percent) or 0
       item.display_text = update.text or ""
@@ -1264,7 +1303,9 @@ function Renderer:apply_update(update, defer_render)
     history[#history + 1] = tonumber(update.value) or 0
     local max_points = view.item.max_points or self.config.history_points or 49
     while #history > max_points do table.remove(history, 1) end
-    view.item.grid_offset = (tonumber(view.item.grid_offset) or 0) - (view.item.params and view.item.params.step or 1)
+    local density = math.max(1, tonumber(view.item.params and view.item.params.grid_density) or 10)
+    view.item.grid_offset = (tonumber(view.item.grid_offset) or 0) - 1
+    if view.item.grid_offset < 0 then view.item.grid_offset = density - 1 end
     render_graph(view)
   elseif update.kind == "arc" then
     view.item.percent = tonumber(update.percent) or 0

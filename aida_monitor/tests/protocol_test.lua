@@ -145,13 +145,29 @@ local vector_font = {
     software_clear_count = software_clear_count + 1
     return true
   end,
-  surface_rect = function(_, _, x, y, width, height)
-    software_ops[#software_ops + 1] = { kind = "rect", x = x, y = y, width = width, height = height }
+  surface_rect = function(_, _, x, y, width, height, color, opacity)
+    software_ops[#software_ops + 1] = {
+      kind = "rect", x = x, y = y, width = width, height = height,
+      color = color, opacity = opacity,
+    }
     return true
   end,
   surface_circle = function() return true end,
-  surface_line = function() return true end,
-  surface_arc = function() return true end,
+  surface_line = function(_, _, x1, y1, x2, y2, color, opacity, width)
+    software_ops[#software_ops + 1] = {
+      kind = "line", x1 = x1, y1 = y1, x2 = x2, y2 = y2,
+      color = color, opacity = opacity, width = width,
+    }
+    return true
+  end,
+  surface_arc = function(_, _, cx, cy, radius, start_angle, end_angle, color, opacity, width)
+    software_ops[#software_ops + 1] = {
+      kind = "arc", cx = cx, cy = cy, radius = radius,
+      start_angle = start_angle, end_angle = end_angle,
+      color = color, opacity = opacity, width = width,
+    }
+    return true
+  end,
   surface_text = function(_, _, x, y, width, height, text)
     vector_render_count = vector_render_count + 1
     software_texts[#software_texts + 1] = {
@@ -196,6 +212,35 @@ assert(renderer:snapshot().surface_bytes == 320 * 240 * 2, "software surface siz
 renderer:apply_sample(sample)
 assert(renderer.active_page == 1, "renderer first page")
 assert(#renderer.views.Gph4.item.history == 1, "graph history")
+renderer:apply_sample({ updates = {
+  { id = "Gph4", kind = "graph", value = 55 },
+  { id = "Gph6", kind = "graph", value = 55 },
+} })
+renderer:apply_sample({ updates = {
+  { id = "Gph4", kind = "graph", value = 70 },
+  { id = "Gph6", kind = "graph", value = 70 },
+} })
+local line_reaches_graph_right = false
+local line_uses_aida_spacing = false
+local histogram_latest = false
+local histogram_previous = false
+local exact_arc_geometry = false
+for _, operation in ipairs(software_ops) do
+  if operation.kind == "line" and operation.color == 0x00FFFF then
+    if operation.x1 == 98 then line_reaches_graph_right = true end
+    if math.abs(operation.x1 - operation.x2) == 2 then line_uses_aida_spacing = true end
+  elseif operation.kind == "rect" and operation.color == 0xFF00FF and operation.width == 2 then
+    if operation.x == 305 then histogram_latest = true end
+    if operation.x == 302 then histogram_previous = true end
+  elseif operation.kind == "arc" and operation.color == 0x00FF00
+    and operation.cx == 160 and operation.cy == 181 and operation.radius == 39 then
+    exact_arc_geometry = true
+  end
+end
+assert(line_reaches_graph_right, "graph scale does not reserve or black out plot width")
+assert(line_uses_aida_spacing, "line graph uses AIDA64 step + 1 spacing")
+assert(histogram_latest and histogram_previous, "histogram uses thick + step spacing")
+assert(exact_arc_geometry, "arc uses AIDA64 width-derived circular geometry")
 renderer:apply_sample(AidaClient.parse_remote_payload("Page1{|}Simple11|OK{|}"))
 assert(renderer.active_page == 2, "renderer second page")
 assert(renderer:snapshot().items == 9, "renderer snapshot")

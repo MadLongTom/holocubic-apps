@@ -17,7 +17,7 @@ static void font_stb_free(void *ptr, void *userdata);
 #include "stb_truetype.h"
 
 #define FONT_MODULE_EXPORT __attribute__((visibility("default"), used))
-#define FONT_VERSION "0.2.0"
+#define FONT_VERSION "0.3.0"
 #define FONT_CACHE_SLOTS 96u
 #define FONT_CACHE_LIMIT (512u * 1024u)
 #define FONT_MAX_FILE_BYTES (4u * 1024u * 1024u)
@@ -338,7 +338,7 @@ static cached_glyph_t *glyph_get(font_instance_t *inst, uint32_t requested, int 
         }
     }
 
-    scale = stbtt_ScaleForPixelHeight(&inst->font, (float)size_px);
+    scale = stbtt_ScaleForMappingEmToPixels(&inst->font, (float)size_px);
     stbtt_GetCodepointHMetrics(&inst->font, (int)codepoint, &advance, &bearing);
     (void)bearing;
     bitmap = stbtt_GetCodepointBitmap(&inst->font, scale, scale, (int)codepoint,
@@ -420,7 +420,7 @@ static int text_width(font_instance_t *inst,
     const char *cursor = text;
     const char *end = text + text_len;
     uint32_t previous = 0;
-    float scale = stbtt_ScaleForPixelHeight(&inst->font, (float)size_px);
+    float scale = stbtt_ScaleForMappingEmToPixels(&inst->font, (float)size_px);
     int width = 0;
     while (cursor < end && *cursor) {
         uint32_t requested = utf8_next(&cursor, end);
@@ -553,7 +553,7 @@ static void draw_text_pass(font_instance_t *inst,
     const char *cursor = text;
     const char *end = text + text_len;
     uint32_t previous = 0;
-    float scale = stbtt_ScaleForPixelHeight(&inst->font, (float)size_px);
+    float scale = stbtt_ScaleForMappingEmToPixels(&inst->font, (float)size_px);
     int pen = origin_x;
     int glyph_count = 0;
     while (cursor < end && *cursor) {
@@ -826,32 +826,64 @@ static int l_surface_arc(lua_State *L)
 {
     font_instance_t *inst = instance_from_lua(L);
     software_surface_t *surface = NULL;
-    int cx = 0, cy = 0, radius = 0, opacity = 255, width = 1;
+    float cx = 0.0f, cy = 0.0f, radius = 0.0f;
+    int opacity = 255, width = 1;
     float start = 0.0f, finish = 0.0f, span = 0.0f;
-    int steps = 0, step = 0;
+    float half_width = 0.0f, outer = 0.0f;
+    int min_x = 0, max_x = 0, min_y = 0, max_y = 0;
+    int x = 0, y = 0;
     uint32_t color = 0;
     if (!inst) return 0;
     surface = surface_get(inst, (int)inst->host.lua.checkinteger(L, 1));
-    cx = (int)inst->host.lua.checkinteger(L, 2);
-    cy = (int)inst->host.lua.checkinteger(L, 3);
-    radius = (int)inst->host.lua.checkinteger(L, 4);
+    cx = (float)inst->host.lua.checknumber(L, 2);
+    cy = (float)inst->host.lua.checknumber(L, 3);
+    radius = (float)inst->host.lua.checknumber(L, 4);
     start = (float)inst->host.lua.checknumber(L, 5);
     finish = (float)inst->host.lua.checknumber(L, 6);
     color = (uint32_t)inst->host.lua.checkinteger(L, 7);
     opacity = (int)inst->host.lua.checkinteger(L, 8);
     width = (int)inst->host.lua.checkinteger(L, 9);
     if (!surface) return push_error(L, &inst->host, "surface is invalid");
-    if (radius < 1) radius = 1;
+    if (radius < 0.5f) radius = 0.5f;
     if (width < 1) width = 1;
     span = finish - start;
-    steps = (int)ceilf(fabsf(span) * (float)radius * 0.01745329252f);
-    if (steps < (int)ceilf(fabsf(span))) steps = (int)ceilf(fabsf(span));
-    if (steps < 1) steps = 1;
-    for (step = 0; step <= steps; ++step) {
-        float angle = (start + span * (float)step / (float)steps - 90.0f) * 0.01745329252f;
-        int x = cx + (int)floorf(cosf(angle) * radius + 0.5f);
-        int y = cy + (int)floorf(sinf(angle) * radius + 0.5f);
-        surface_brush(surface, x, y, width, color, opacity);
+    if (fabsf(span) < 0.0001f) {
+        inst->host.lua.pushboolean(L, 1);
+        return 1;
+    }
+    half_width = (float)width * 0.5f;
+    outer = radius + half_width + 1.0f;
+    min_x = (int)floorf(cx - outer);
+    max_x = (int)ceilf(cx + outer);
+    min_y = (int)floorf(cy - outer);
+    max_y = (int)ceilf(cy + outer);
+    for (y = min_y; y <= max_y; ++y) {
+        for (x = min_x; x <= max_x; ++x) {
+            float dx = ((float)x + 0.5f) - cx;
+            float dy = ((float)y + 0.5f) - cy;
+            float distance = sqrtf(dx * dx + dy * dy);
+            float coverage = half_width + 0.5f - fabsf(distance - radius);
+            float angle = 0.0f;
+            float relative = 0.0f;
+            int pixel_opacity = 0;
+            if (coverage <= 0.0f) continue;
+            if (fabsf(span) < 359.999f) {
+                angle = atan2f(dy, dx) * 57.2957795131f + 90.0f;
+                while (angle < 0.0f) angle += 360.0f;
+                while (angle >= 360.0f) angle -= 360.0f;
+                relative = angle - start;
+                while (relative < 0.0f) relative += 360.0f;
+                while (relative >= 360.0f) relative -= 360.0f;
+                if (span > 0.0f) {
+                    if (relative > span) continue;
+                } else {
+                    if (relative < 360.0f + span) continue;
+                }
+            }
+            if (coverage > 1.0f) coverage = 1.0f;
+            pixel_opacity = (int)floorf((float)opacity * coverage + 0.5f);
+            surface_pixel(surface, x, y, color, pixel_opacity);
+        }
     }
     inst->host.lua.pushboolean(L, 1);
     return 1;
@@ -908,7 +940,7 @@ static int l_surface_text(lua_State *L)
     pixel_count = (size_t)width * (size_t)height;
     layer = (premul_pixel_t *)font_calloc(inst, pixel_count, sizeof(premul_pixel_t));
     if (!layer) return push_error(L, &inst->host, "not enough memory for text layer");
-    scale = stbtt_ScaleForPixelHeight(&inst->font, (float)size_px);
+    scale = stbtt_ScaleForMappingEmToPixels(&inst->font, (float)size_px);
     stbtt_GetFontVMetrics(&inst->font, &ascent, &descent, &line_gap);
     (void)descent; (void)line_gap;
     baseline = (int)ceilf((float)ascent * scale);
@@ -1156,7 +1188,7 @@ static int l_font_render(lua_State *L)
         return push_error(L, &inst->host, "not enough memory for text surface");
     }
 
-    scale = stbtt_ScaleForPixelHeight(&inst->font, (float)size_px);
+    scale = stbtt_ScaleForMappingEmToPixels(&inst->font, (float)size_px);
     stbtt_GetFontVMetrics(&inst->font, &ascent, &descent, &line_gap);
     (void)descent;
     (void)line_gap;

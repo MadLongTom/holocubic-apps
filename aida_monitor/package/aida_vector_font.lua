@@ -154,7 +154,7 @@ end
 
 function VectorFont:surface_arc(id, cx, cy, radius, start_angle, end_angle, color, opacity, width)
   local ok, result, err = pcall(self.module.surface_arc, id,
-    math.floor(cx + 0.5), math.floor(cy + 0.5), math.max(1, math.floor(radius + 0.5)),
+    tonumber(cx) or 0, tonumber(cy) or 0, math.max(0.5, tonumber(radius) or 0.5),
     tonumber(start_angle) or 0, tonumber(end_angle) or 0,
     tonumber(color) or 0, clamp(opacity or 255, 0, 255), math.max(1, math.floor(width or 1)))
   if not ok or result == false or result == nil then return false, tostring(err or result) end
