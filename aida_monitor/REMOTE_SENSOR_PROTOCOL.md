@@ -45,6 +45,26 @@ CSS is part of the ABI. The parser retains position, size, visibility, colors,
 gradients, font family/size/style/weight, decorations, shadows, bar borders and
 direction, and explicit `z-index`. Items in one z-plane retain DOM order.
 
+The installed AIDA64 configuration exposes the following `.rslcd`/INI source
+fields. They are documented here for diffing, but the app intentionally consumes
+their generated CSS/Canvas form so new combinations do not require a second
+parallel parser:
+
+| Source group | Observed fields |
+| --- | --- |
+| document/page | `LCDVER`, `SWVER`, `LCDBGCOLOR`, `LCDPAGE1...N` |
+| identity/geometry | `ID`, `LBL`, `ITMX`, `ITMY`, `WID`, `HEI` |
+| text | `TXTSIZ`, `FNTNAM`, `TXTCOL`, `TXTBIR`, `SHWLBL`, `SHWVAL`, `SHWUNT`, `UNT` |
+| styled SensorItem text | `SHDCOL`, `SHDDIS`, `SHDDEP`, `LBLCOL`, `LBLBIS`, `VALCOL`, `VALBIS`, `UNTCOL`, `UNTBIS`, `UNTWID` |
+| SensorItem bar | `SHWBAR`, `BARWID`, `BARHEI`, `BARIND`, `BARPLC`, `BARFS`, `BARFRMCOL`, `BARMIN`, `BARLIM1...3`, `BARMAX`, and each range's `FGC`/`BGC` colors |
+| graph | `TYP`, `GPHSTP`, `GPHTCK`, `GRDDNS`, `MINVAL`, `MAXVAL`, `AUTSCL`, `GRDCOL`, `GPHCOL`, `BGCOL`, `FRMCOL`, `GPHBFG`, `SHWSCL`, `SCLCOL`, `SCLBI` |
+| arc | `DIA`, `TCK`, `STAANG`, `OPT`, `MIN`, `LIM1...3`, `MAX`, range colors, and value text fields |
+| image | `IMGFIL`, `BGIMG`, `RESIZW`, `RESIZH` |
+
+The three-character `*BIS`/`*BIR` flags become generated font weight/style and
+text-decoration CSS. Threshold/range colors become the live Arc/Bar colors in
+SSE, so the device follows AIDA's own range selection instead of duplicating it.
+
 `body background-image` has special AIDA `BGIMG=1` semantics. It is normalized
 to `(0,0,320,240)` and stretched independently on both axes. It is not emitted
 as a foreground `<img>` widget.
