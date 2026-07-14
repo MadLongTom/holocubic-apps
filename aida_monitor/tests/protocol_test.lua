@@ -40,6 +40,8 @@ end
 LV_PART_MAIN, LV_STATE_DEFAULT = 0, 0
 LV_OBJ_FLAG_SCROLLABLE, LV_OBJ_FLAG_HIDDEN = 1, 2
 LV_IMG_CF_TRUE_COLOR = 1
+LV_FONT_MONTSERRAT_14 = 114
+local selected_fonts = {}
 lv_scr_act = function() return 1 end
 lv_obj_create = function() return object() end
 lv_label_create = function() return object() end
@@ -55,7 +57,7 @@ lv_obj_set_style_radius = function() end
 lv_obj_set_style_pad_all = function() end
 lv_obj_set_style_text_color = function() end
 lv_obj_set_style_text_opa = function() end
-lv_obj_set_style_text_font = function() end
+lv_obj_set_style_text_font = function(_, font) selected_fonts[#selected_fonts + 1] = font end
 lv_obj_set_style_text_align = function() end
 lv_obj_set_style_bg_grad_color = function() end
 lv_obj_set_style_bg_grad_dir = function() end
@@ -79,13 +81,43 @@ local png_large = "\137PNG\13\10\26\10" .. string.char(0, 0, 0, 13) .. "IHDR"
   .. string.char(0, 0, 8, 112, 0, 0, 8, 108)
 local _, large_width, large_height = Renderer.image_info(png_large)
 assert(large_width == 2160 and large_height == 2156, "large PNG dimensions")
-local renderer = Renderer.new({ config = { history_points = 49 }, layout = model, root = 1 })
+local renderer = Renderer.new({ config = { history_points = 49, font = "builtin:14" }, layout = model, root = 1 })
 renderer:build()
+assert(selected_fonts[1] == LV_FONT_MONTSERRAT_14, "fixed built-in font")
 renderer:apply_sample(sample)
 assert(renderer.active_page == 1, "renderer first page")
 assert(#renderer.views.Gph4.item.history == 1, "graph history")
 renderer:apply_sample(AidaClient.parse_remote_payload("Page1{|}Simple11|OK{|}"))
 assert(renderer.active_page == 2, "renderer second page")
 assert(renderer:snapshot().items == 9, "renderer snapshot")
+assert(renderer:snapshot().font == "builtin:14", "renderer font snapshot")
+
+local routes = {}
+file = {
+  listdir = function(path)
+    if path == "/sd/apps" then return {{ name = "weather", is_dir = true }} end
+    if path == "/sd/apps/weather/font" then
+      return {{ name = "weather_ui_12.bin", is_dir = false }}
+    end
+    return {}
+  end,
+}
+httpd = {
+  GET = "GET",
+  start = function() end,
+  dynamic = function(_, route, handler) routes[route] = handler end,
+  unregister = function() end,
+}
+local Web = dofile("aida_monitor/package/web.lua")
+local web = Web.new({
+  config = { host = "192.168.0.232", port = 9999, font = "auto" },
+  config_path = "/tmp/config.lua",
+  route_base = "/aida_monitor",
+  state = function() return {} end,
+})
+web:start()
+local page = routes["/aida_monitor/"]()
+assert(page.body:find("Montserrat 14 px", 1, true), "built-in font option")
+assert(page.body:find("weather_ui_12.bin", 1, true), "SD font option")
 
 print("RemoteSensor protocol tests passed")

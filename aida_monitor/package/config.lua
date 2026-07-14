@@ -5,6 +5,9 @@ config.host = "192.168.0.232"
 config.port = 9999
 config.layout_path = "/"
 config.path = "/sse"
+-- auto follows AIDA64 sizes with built-in Montserrat. The WebUI can select a
+-- fixed built-in size or any LVGL .bin font currently present on the SD card.
+config.font = "auto"
 
 config.timeout_ms = 7000
 config.reconnect_ms = 2000

@@ -179,6 +179,7 @@ fetch_layout = function(reason)
     })
     local built, build_err = pcall(function() renderer:build() end)
     if not built then
+      renderer:destroy()
       set_status("RENDER ERROR", tostring(build_err))
       show_message("LAYOUT NOT SUPPORTED", tostring(build_err), 0xFF6B5F)
       schedule_layout_retry(config.layout_retry_ms or 3000, fetch_layout)
@@ -204,6 +205,9 @@ function state.snapshot()
     images_loaded = render.images_loaded or 0,
     images_skipped = render.images_skipped or 0,
     image_error = render.image_error or "",
+    font = render.font or tostring(config.font or "auto"),
+    font_loaded = render.font_loaded ~= false,
+    font_error = render.font_error or "",
   }
 end
 

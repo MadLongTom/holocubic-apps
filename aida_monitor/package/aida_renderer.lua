@@ -9,6 +9,7 @@ local FLAG_SCROLLABLE = rawget(_G, "LV_OBJ_FLAG_SCROLLABLE")
 local FLAG_HIDDEN = rawget(_G, "LV_OBJ_FLAG_HIDDEN")
 local GRAD_VER = rawget(_G, "LV_GRAD_DIR_VER") or 1
 local CANVAS_FMT = rawget(_G, "LV_IMG_CF_TRUE_COLOR") or rawget(_G, "CANVAS_FMT_TRUE_COLOR")
+local BUILTIN_FONT_SIZES = { 8, 10, 12, 14, 16, 20, 24, 28 }
 
 local function call(fn, ...)
   if not fn then return false end
@@ -20,6 +21,15 @@ local function clamp(value, low, high)
   if value < low then return low end
   if value > high then return high end
   return value
+end
+
+local function builtin_font(size)
+  size = tonumber(size) or 12
+  local nearest = BUILTIN_FONT_SIZES[1]
+  for _, candidate in ipairs(BUILTIN_FONT_SIZES) do
+    if math.abs(candidate - size) < math.abs(nearest - size) then nearest = candidate end
+  end
+  return rawget(_G, "LV_FONT_MONTSERRAT_" .. tostring(nearest)) or nearest
 end
 
 local function set_hidden(object, hidden)
@@ -62,7 +72,7 @@ local function style_align(value)
   return ALIGN_LEFT
 end
 
-local function make_label(parent, geometry, text_style, width)
+local function make_label(parent, geometry, text_style, width, renderer)
   local object = lv_label_create(parent)
   local x = geometry and geometry.x or 0
   local y = geometry and geometry.y or 0
@@ -73,7 +83,9 @@ local function make_label(parent, geometry, text_style, width)
   call(lv_label_set_text, object, tostring(text_style and text_style.text or ""))
   call(lv_obj_set_style_text_color, object, text_style and text_style.color or 0xFFFFFF, MAIN)
   call(lv_obj_set_style_text_opa, object, 255, MAIN)
-  call(lv_obj_set_style_text_font, object, text_style and text_style.font and text_style.font.size or 12, MAIN)
+  local requested_size = text_style and text_style.font and text_style.font.size or 12
+  local selected_font = renderer and renderer:font_for_size(requested_size) or builtin_font(requested_size)
+  call(lv_obj_set_style_text_font, object, selected_font, MAIN)
   call(lv_obj_set_style_text_align, object, style_align(text_style and text_style.align), MAIN)
   return object
 end
@@ -120,13 +132,14 @@ local function draw_line(canvas, x1, y1, x2, y2, color, opacity, width)
     math.floor(x2 + 0.5), math.floor(y2 + 0.5), color, opacity or 255, width or 1)
 end
 
-local function draw_text(canvas, x, y, width, text, color, size, align, opacity)
-  local ok = call(lv_canvas_draw_text, canvas, math.floor(x), math.floor(y), math.max(1, math.floor(width)),
-    tostring(text or ""), color or 0xFFFFFF, opacity or 255, align or ALIGN_LEFT, size or 10)
+local function draw_text(canvas, x, y, width, text, color, size, align, opacity, font_handle)
+  local px, py, draw_width = math.floor(x), math.floor(y), math.max(1, math.floor(width))
+  local descriptor = { color = color or 0xFFFFFF, opa = opacity or 255,
+    align = align or ALIGN_LEFT, font_size = size or 10, font_handle = font_handle }
+  local ok = call(lv_canvas_draw_text, canvas, px, py, draw_width, tostring(text or ""), descriptor)
   if not ok then
-    call(lv_canvas_draw_text, canvas, math.floor(x), math.floor(y), math.max(1, math.floor(width)),
-      tostring(text or ""), { color = color or 0xFFFFFF, opa = opacity or 255,
-      align = align or ALIGN_LEFT, font_size = size or 10 })
+    call(lv_canvas_draw_text, canvas, px, py, draw_width, tostring(text or ""),
+      color or 0xFFFFFF, opacity or 255, align or ALIGN_LEFT, size or 10)
   end
 end
 
@@ -225,9 +238,10 @@ local function render_graph(view)
     local text_x = p.right_align and (right + 2) or 0
     local align = p.right_align and ALIGN_LEFT or ALIGN_RIGHT
     draw_text(canvas, text_x, top, scale_width - 2, tostring(math.floor(maximum + 0.5)),
-      p.font_color, p.font_size, align, 255)
+      p.font_color, p.font_size, align, 255, view.renderer:font_for_size(p.font_size))
     draw_text(canvas, text_x, math.max(top, bottom - (p.font_size or 8) - 1), scale_width - 2,
-      tostring(math.floor(minimum + 0.5)), p.font_color, p.font_size, align, 255)
+      tostring(math.floor(minimum + 0.5)), p.font_color, p.font_size, align, 255,
+      view.renderer:font_for_size(p.font_size))
   end
   if p.show_frame then
     draw_line(canvas, 0, 0, width - 1, 0, p.frame_color, 255, 1)
@@ -277,7 +291,7 @@ local function render_arc(view)
   if p.show_text then
     local size = p.font_size or 10
     draw_text(canvas, 0, math.floor((height - size) / 2), width, item.display_text or "",
-      p.font_color or 0xFFFFFF, size, ALIGN_CENTER, 255)
+      p.font_color or 0xFFFFFF, size, ALIGN_CENTER, 255, view.renderer:font_for_size(size))
   end
   canvas_end(canvas, explicit)
 end
@@ -542,12 +556,54 @@ function Renderer.new(opts)
   self.image_loaded = 0
   self.image_skipped = 0
   self.last_image_error = ""
+  self.font_choice = tostring(self.config.font or "auto")
+  self.font_handle = nil
+  self.fixed_font = nil
+  self.font_error = ""
   self.active_page = 1
   return self
 end
 
+function Renderer:prepare_font()
+  self.font_handle = nil
+  self.fixed_font = nil
+  self.font_error = ""
+  local fixed_size = self.font_choice:match("^builtin:(%d+)$")
+  if fixed_size then
+    self.fixed_font = builtin_font(tonumber(fixed_size))
+    return
+  end
+  if self.font_choice == "auto" or self.font_choice == "" then return end
+  if self.font_choice:sub(1, 1) ~= "/" then
+    self.font_error = "unknown font selection"
+    return
+  end
+  if file and file.exists then
+    local checked, exists = pcall(file.exists, self.font_choice)
+    if not checked or not exists then
+      self.font_error = "font file missing: " .. self.font_choice
+      return
+    end
+  end
+  if not lv_font_load then
+    self.font_error = "font loader unavailable"
+    return
+  end
+  local loaded, handle_or_error = pcall(lv_font_load, self.font_choice)
+  if loaded and type(handle_or_error) == "number" and handle_or_error > 0 then
+    self.font_handle = handle_or_error
+    self.fixed_font = handle_or_error
+  else
+    self.font_error = "font load failed: " .. tostring(handle_or_error)
+  end
+end
+
+function Renderer:font_for_size(size)
+  return self.fixed_font or builtin_font(size)
+end
+
 function Renderer:make_text(page, item, geometry, text_style, width)
-  local object = make_label(page, geometry, text_style, width)
+  local object = make_label(page, geometry, text_style, width, self)
   return { object = object, item = item, kind = "text" }
 end
 
@@ -557,18 +613,18 @@ function Renderer:build_sensor(page, item)
   local width = g.w > 0 and g.w or math.max(1, 320 - g.x)
   if item.label then
     local sg = item.label.style or {}
-    view.label = make_label(page, { x = g.x, y = g.y }, item.label.text_style, width)
+    view.label = make_label(page, { x = g.x, y = g.y }, item.label.text_style, width, self)
   end
   if item.value then
     local vg = item.value.style or {}
     local x = g.x + (tonumber((vg.left or ""):match("([%-]?%d+)")) or 0)
-    view.value = make_label(page, { x = x, y = g.y }, item.value.text_style, width - (x - g.x))
+    view.value = make_label(page, { x = x, y = g.y }, item.value.text_style, width - (x - g.x), self)
   end
   if item.unit then
     local ug = item.unit.style or {}
     local unit_style = item.unit.text_style
     unit_style.align = "right"
-    view.unit = make_label(page, { x = g.x, y = g.y }, unit_style, width)
+    view.unit = make_label(page, { x = g.x, y = g.y }, unit_style, width, self)
   end
   if item.bar then
     local bg = item.bar.geometry
@@ -596,7 +652,7 @@ function Renderer:build_item(page, item)
     item.canvas_background = self.layout.background or 0
     local canvas = canvas_create(page, math.max(1, item.geometry.w), math.max(1, item.geometry.h))
     if canvas then call(lv_obj_set_pos, canvas, item.geometry.x, item.geometry.y) end
-    view = { object = canvas, item = item, kind = item.kind }
+    view = { object = canvas, item = item, kind = item.kind, renderer = self }
     if item.kind == "graph" then render_graph(view) else render_arc(view) end
   elseif item.kind == "image" then
     view = { item = item, kind = "image", object = nil }
@@ -611,6 +667,7 @@ function Renderer:build_item(page, item)
 end
 
 function Renderer:build()
+  self:prepare_font()
   call(lv_obj_clean, self.root)
   call(lv_obj_set_style_bg_color, self.root, self.layout.background or 0, MAIN)
   call(lv_obj_set_style_bg_opa, self.root, 255, MAIN)
@@ -643,7 +700,7 @@ function Renderer:load_next_image()
     call(lv_obj_set_style_border_color, panel, 0xFF5D5D, MAIN)
     local label = make_label(panel, { x = 1, y = math.max(0, math.floor(height / 2) - 6), w = inner_width }, {
       text = "IMG", color = 0xFF5D5D, font = { size = 8 }, align = "center",
-    }, inner_width)
+    }, inner_width, self)
     pending.view.object = panel
     pending.view.placeholder = label
   end
@@ -762,10 +819,17 @@ function Renderer:snapshot()
     images_loaded = self.image_loaded,
     images_skipped = self.image_skipped,
     image_error = self.last_image_error,
+    font = self.font_choice,
+    font_loaded = self.font_error == "",
+    font_error = self.font_error,
   }
 end
 
 function Renderer:destroy()
+  call(lv_obj_clean, self.root)
+  if self.font_handle and lv_font_free then call(lv_font_free, self.font_handle) end
+  self.font_handle = nil
+  self.fixed_font = nil
   self.image_queue = {}
   self.image_busy = false
   self.pages = {}

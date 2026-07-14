@@ -43,6 +43,8 @@ Open the AIDA Monitor management page from HoloCubic WebUI. It exposes:
 - RemoteSensor port
 - Layout path (normally `/`)
 - SSE path (normally `/sse`)
+- Device font: automatic AIDA64-size mapping, a fixed built-in Montserrat size,
+  or any LVGL `.bin` font found under an installed app's `font` directory
 - Runtime status, active page, page count, and parsed item count
 
 The defaults in this checkout are:
@@ -52,6 +54,7 @@ config.host = "192.168.0.232"
 config.port = 9999
 config.layout_path = "/"
 config.path = "/sse"
+config.font = "auto"
 ```
 
 ## Rendering model
@@ -59,6 +62,13 @@ config.path = "/sse"
 RemoteSensor uses browser coordinates and does not put a canonical canvas size into the HTML response. The app therefore uses AIDA64's 320×240 preview coordinates **1:1 with no scaling**. Content outside the device viewport is clipped just like a 320×240 browser viewport.
 
 AIDA64 font size, color, alignment, style metadata, positions, gradients, histories, scales, grids, frames, and active page are parsed. Desktop font family names and bold/italic faces such as Tahoma/Arial are mapped to fonts available in the HoloCubic firmware, so glyph metrics and face styling can differ slightly from a desktop browser.
+
+The management page discovers the device's built-in Montserrat sizes and the
+`.bin` fonts currently installed on the SD card. `AUTO` preserves AIDA64's
+requested size by selecting the nearest built-in font. Selecting an SD font
+applies that fixed-size, fixed-character-set font to labels, sensor values,
+graph scales, and Arc Gauge text; specialized numeric fonts may not contain
+letters, units, CJK characters, or symbols.
 
 Remote images are stored under `/sd/apps/aida_monitor/cache`. A layout `ReLoad` rebuilds the UI and refreshes the resources so replacing an image under the same filename is reflected on the device.
 
