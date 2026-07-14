@@ -647,7 +647,7 @@ function Renderer.new(opts)
   self.background_ready = false
   self.vector_font = opts.vector_font
   self.font_choice = tostring(self.vector_font and self.vector_font.family
-    or self.config.vector_font_family or "AIDA Noto Sans SC")
+    or self.config.vector_font_family or "Tahoma")
   self.font_error = ""
   self.active_page = 1
   return self
@@ -1441,6 +1441,7 @@ function Renderer:snapshot()
     images_skipped = self.image_skipped,
     image_error = self.last_image_error,
     font = self.font_choice,
+    font_face = font_stats.face or self.font_choice,
     font_engine = font_stats.engine or "firmware fallback",
     font_loaded = font_stats.loaded == true and self.font_error == "",
     font_error = self.font_error ~= "" and self.font_error or font_stats.error or "",

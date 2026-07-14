@@ -5,15 +5,17 @@ config.host = "192.168.0.232"
 config.port = 9999
 config.layout_path = "/"
 config.path = "/sse"
--- A single OFL-licensed Chinese TrueType face is rasterized on device at the
--- exact size requested by AIDA64. Keep the family name in sync with WebUI.
-config.vector_font_family = "AIDA Noto Sans SC"
+-- AIDA64 uses Tahoma as its default LCD family. The device keeps that logical
+-- family while rasterizing the bundled OFL-licensed Chinese face as a safe
+-- fallback; uploading tahoma.ttf makes the logical and physical faces match.
+config.vector_font_family = "Tahoma"
+config.vector_font_fallback_family = "AIDA Noto Sans SC"
 config.vector_font_module = "/sd/apps/aida_monitor/modules/aida_font.so"
 config.vector_font_path = "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"
 config.vector_font_default_path = "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"
 -- WebUI stores one user-supplied TTF here. It is selected only when its
 -- configured family is present in the current AIDA64 layout; otherwise the
--- bundled Chinese font above remains active.
+-- bundled Chinese fallback above remains active.
 config.vector_font_custom_family = ""
 config.vector_font_custom_path = "/sd/apps/aida_monitor/font/uploaded.ttf"
 config.vector_font_custom_name = ""

@@ -26,8 +26,9 @@ This target is the complete **RemoteSensor LCD** feature set. SensorPanel-only C
 3. Set the RemoteSensor port (this checkout defaults to `9999`).
 4. Set Preview Resolution to **320 × 240**.
 5. Use AIDA64's normal LCD Items editor to build the screen and pages.
-6. Either install the bundled `AIDA Noto Sans SC`, or upload the TTF already
-   used by the layout. The configured family must match AIDA64's font name.
+6. Keep AIDA64's default LCD family, `Tahoma`. For an exact Windows match,
+   upload the host's own `tahoma.ttf`; the bundled Noto Sans SC face remains a
+   CJK-safe device fallback and does not need to be selected in AIDA64.
 7. Click **Apply**.
 
 You should now be able to open both URLs from another LAN device:
@@ -60,7 +61,8 @@ config.host = "192.168.0.232"
 config.port = 9999
 config.layout_path = "/"
 config.path = "/sse"
-config.vector_font_family = "AIDA Noto Sans SC"
+config.vector_font_family = "Tahoma"
+config.vector_font_fallback_family = "AIDA Noto Sans SC"
 config.vector_font_module = "/sd/apps/aida_monitor/modules/aida_font.so"
 config.vector_font_path = "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"
 config.vector_font_custom_family = ""
@@ -78,9 +80,11 @@ integer size rather than snapped to a firmware bitmap size.
 
 The bundled native `aida_font.so` module uses `stb_truetype` to rasterize an
 OFL-licensed, GB2312-subsetted Noto Sans SC fallback or one uploaded TrueType
-face. Before building a layout, the app compares AIDA64's requested font
-families with the uploaded family; a mismatch or load failure reopens the
-bundled fallback. The renderer maintains a
+face. The default logical family is AIDA64's `Tahoma`, while the physical face
+is the bundled CJK-safe fallback until the user uploads `tahoma.ttf`. Before
+building a layout, the app compares AIDA64's requested font families with the
+uploaded family; a mismatch or load failure reopens the bundled fallback while
+preserving AIDA64's default-family semantics. The renderer maintains a
 320×240 RGB565 page surface in PSRAM and blends glyph A8 coverage, shadows,
 graphs, arcs, and Sensor text before the firmware sees the frame. This avoids
 firmware chroma-key limitations and preserves overlapping content. A 512 KiB

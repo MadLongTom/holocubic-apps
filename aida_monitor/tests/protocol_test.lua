@@ -125,28 +125,34 @@ package.preload["aida_font_select_test"] = function()
 end
 local font_select_config = {
   vector_font_module = "aida_font_select_test",
-  vector_font_family = "AIDA Noto Sans SC",
+  vector_font_family = "Tahoma",
+  vector_font_fallback_family = "AIDA Noto Sans SC",
   vector_font_default_path = "/default.ttf",
-  vector_font_custom_family = "Noto Sans SC",
+  vector_font_custom_family = "Tahoma",
   vector_font_custom_path = "/custom.ttf",
 }
 local font_select_layout = Layout.parse([=[<html><style>body { background-color:#000 }</style><body>
-<span id="Label1" style="position:absolute;left:0;top:0;font-family:'Noto Sans SC'">FONT</span>
+<span id="Label1" style="position:absolute;left:0;top:0;font-family:Tahoma">FONT</span>
 </body></html>]=])
 local font_selector = VectorFont.new(font_select_config)
 assert(font_selector:select_for_layout(font_select_layout, font_select_config), "uploaded font selected")
 assert(font_selector.source == "uploaded" and font_selector.match
-  and font_selector.family == "Noto Sans SC", "layout family matches uploaded TTF")
+  and font_selector.family == "Tahoma" and font_selector.face == "Tahoma",
+  "layout Tahoma family matches uploaded TTF")
 assert(selected_paths[#selected_paths] == "/custom.ttf", "custom TTF opened after match")
 local unmatched_layout = Layout.parse([=[<html><style>body { background-color:#000 }</style><body>
-<span id="Label1" style="position:absolute;left:0;top:0;font-family:Tahoma">FONT</span>
+<span id="Label1" style="position:absolute;left:0;top:0;font-family:'Noto Sans SC'">FONT</span>
 </body></html>]=])
 assert(font_selector:select_for_layout(unmatched_layout, font_select_config), "default font selected")
 assert(font_selector.source == "default" and not font_selector.match
-  and selected_paths[#selected_paths] == "/default.ttf", "unmatched family falls back to default")
+  and font_selector.family == "Tahoma" and font_selector.face == "AIDA Noto Sans SC"
+  and selected_paths[#selected_paths] == "/default.ttf",
+  "unmatched family preserves Tahoma semantics with bundled fallback face")
 font_select_config.vector_font_custom_path = "/broken.ttf"
 assert(font_selector:select_for_layout(font_select_layout, font_select_config), "broken custom falls back")
-assert(font_selector.source == "default" and font_selector.selection_error:find("broken font", 1, true),
+assert(font_selector.source == "default" and font_selector.family == "Tahoma"
+  and font_selector.face == "AIDA Noto Sans SC"
+  and font_selector.selection_error:find("broken font", 1, true),
   "custom load failure is reported while default remains available")
 
 local next_object = 10
@@ -272,7 +278,8 @@ local vector_font = {
   stats = function()
     return { loaded = true, engine = "stb_truetype", font_bytes = 2432892,
       cache_bytes = 4096, cache_entries = 8, renders = vector_render_count,
-      surface_bytes = 320 * 240 * 2, surface_flushes = software_flush_count }
+      face = "AIDA Noto Sans SC", surface_bytes = 320 * 240 * 2,
+      surface_flushes = software_flush_count }
   end,
 }
 
@@ -286,7 +293,8 @@ local png_large = "\137PNG\13\10\26\10" .. string.char(0, 0, 0, 13) .. "IHDR"
 local _, large_width, large_height = Renderer.image_info(png_large)
 assert(large_width == 2160 and large_height == 2156, "large PNG dimensions")
 local renderer = Renderer.new({ config = { history_points = 49,
-  vector_font_family = "AIDA Noto Sans SC" }, layout = model, root = 1,
+  vector_font_family = "Tahoma", vector_font_fallback_family = "AIDA Noto Sans SC" },
+  layout = model, root = 1,
   vector_font = vector_font })
 renderer:build()
 assert(vector_render_count > 0, "vector text rendered")
@@ -339,7 +347,8 @@ assert(exact_arc_geometry, "arc uses AIDA64 width-derived circular geometry")
 renderer:apply_sample(AidaClient.parse_remote_payload("Page1{|}Simple11|OK{|}"))
 assert(renderer.active_page == 2, "renderer second page")
 assert(renderer:snapshot().items == 9, "renderer snapshot")
-assert(renderer:snapshot().font == "AIDA Noto Sans SC", "renderer font snapshot")
+assert(renderer:snapshot().font == "Tahoma", "renderer logical font snapshot")
+assert(renderer:snapshot().font_face == "AIDA Noto Sans SC", "renderer physical font face snapshot")
 assert(renderer:snapshot().font_engine == "stb_truetype", "renderer font engine")
 assert(software_clear_count >= 3 and software_flush_count >= 3, "software pages rerender and flush")
 local saw_sensor_value = false
@@ -416,13 +425,14 @@ httpd = {
 local Web = dofile("aida_monitor/package/web.lua")
 local web = Web.new({
   config = { host = "192.168.0.232", port = 9999,
-    vector_font_family = "AIDA Noto Sans SC" },
+    vector_font_family = "Tahoma", vector_font_fallback_family = "AIDA Noto Sans SC" },
   config_path = "/tmp/config.lua",
   route_base = "/aida_monitor",
   state = function() return {} end,
 })
 web:start()
 local page = routes["/aida_monitor/"]()
+assert(page.body:find("Tahoma", 1, true), "AIDA64 default font guidance")
 assert(page.body:find("AIDA Noto Sans SC", 1, true), "vector font guidance")
 assert(page.body:find("上传并匹配 TTF", 1, true), "font upload control")
 assert(page.body:find("下载内置中文字体", 1, true), "font download")
@@ -433,7 +443,10 @@ assert(page.body:find("翻页冷却 / MS", 1, true), "tilt page cooldown configu
 assert(routes["/aida_monitor/api/font"], "font upload route registered within handler budget")
 local saved = web:save({ query = "host=192.168.0.232&port=9999&layout_path=%2F&path=%2Fsse" })
 assert(saved.status == "200 OK", "web config save")
-assert(saved_config:find('config.vector_font_family = "AIDA Noto Sans SC"', 1, true), "vector family persisted")
+assert(saved_config:find('config.vector_font_family = "Tahoma"', 1, true),
+  "AIDA64 default family persisted")
+assert(saved_config:find('config.vector_font_fallback_family = "AIDA Noto Sans SC"', 1, true),
+  "physical fallback family persisted")
 assert(saved_config:find("aida_font.so", 1, true), "vector module persisted")
 assert(saved_config:find('config.font_subpixel = "rgb"', 1, true), "subpixel mode persisted")
 assert(saved_config:find("config.tilt_page_cooldown_ms = 1000", 1, true),
@@ -443,7 +456,7 @@ assert(not saved_config:find("config.font =", 1, true), "legacy font selection r
 local ttf_payload = "\0\1\0\0" .. string.rep("\0", 1020)
 local body_sent = false
 local uploaded = web:upload_font({
-  query = "offset=0&total=1024&name=DeskSans.ttf&family=Noto+Sans+SC",
+  query = "offset=0&total=1024&name=tahoma.ttf&family=Tahoma",
   getbody = function()
     if body_sent then return nil end
     body_sent = true
@@ -451,10 +464,10 @@ local uploaded = web:upload_font({
   end,
 })
 assert(uploaded.status == "200 OK", "font upload accepted")
-assert(web.config.vector_font_custom_family == "Noto Sans SC", "uploaded family configured")
+assert(web.config.vector_font_custom_family == "Tahoma", "uploaded Tahoma family configured")
 assert(virtual_files["/sd/apps/aida_monitor/font/uploaded.ttf"] == ttf_payload,
   "uploaded TTF atomically installed")
-assert(saved_config:find('config.vector_font_custom_family = "Noto Sans SC"', 1, true),
+assert(saved_config:find('config.vector_font_custom_family = "Tahoma"', 1, true),
   "uploaded font match persisted")
 local restored = web:reset_font()
 assert(restored.status == "200 OK" and web.config.vector_font_custom_family == "",

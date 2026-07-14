@@ -89,8 +89,10 @@ end
 function VectorFont.new(config)
   config = config or {}
   local self = setmetatable({
-    family = tostring(config.vector_font_family or "AIDA Noto Sans SC"),
-    default_family = tostring(config.vector_font_family or "AIDA Noto Sans SC"),
+    family = tostring(config.vector_font_family or "Tahoma"),
+    default_family = tostring(config.vector_font_family or "Tahoma"),
+    fallback_family = tostring(config.vector_font_fallback_family or "AIDA Noto Sans SC"),
+    face = tostring(config.vector_font_fallback_family or "AIDA Noto Sans SC"),
     module_path = tostring(config.vector_font_module or "/sd/apps/aida_monitor/modules/aida_font.so"),
     default_path = tostring(config.vector_font_default_path or config.vector_font_path
       or "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"),
@@ -100,7 +102,7 @@ function VectorFont.new(config)
       or "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"),
     source = "default",
     match = false,
-    selection = "bundled default",
+    selection = "AIDA default; bundled CJK fallback",
     selection_error = "",
     requested_families = {},
     subpixel_order = tostring(config.font_subpixel or "rgb"):lower(),
@@ -145,7 +147,9 @@ end
 
 function VectorFont:select_for_layout(layout, config)
   config = config or {}
-  self.default_family = tostring(config.vector_font_family or self.default_family or "AIDA Noto Sans SC")
+  self.default_family = tostring(config.vector_font_family or self.default_family or "Tahoma")
+  self.fallback_family = tostring(config.vector_font_fallback_family or self.fallback_family
+    or "AIDA Noto Sans SC")
   self.default_path = tostring(config.vector_font_default_path or config.vector_font_path
     or self.default_path or "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf")
   self.custom_family = trim(config.vector_font_custom_family or self.custom_family)
@@ -181,16 +185,17 @@ function VectorFont:select_for_layout(layout, config)
     self.error = ""
     self.font_path = path
     self.family = family
+    self.face = use_custom and self.custom_family or self.fallback_family
     self.source = use_custom and "uploaded" or "default"
     self.match = use_custom
     if use_custom then
       self.selection = "matched " .. tostring(matched_family)
     elseif wanted == "" then
-      self.selection = "no uploaded font"
+      self.selection = "AIDA default; bundled CJK fallback"
     elseif #self.requested_families == 0 then
-      self.selection = "layout has no font family"
+      self.selection = "layout has no font family; AIDA default"
     else
-      self.selection = "uploaded family not requested"
+      self.selection = "uploaded family not requested; AIDA default"
     end
     return true
   end
@@ -202,6 +207,7 @@ function VectorFont:select_for_layout(layout, config)
       self.error = ""
       self.font_path = self.default_path
       self.family = self.default_family
+      self.face = self.fallback_family
       self.source = "default"
       self.match = false
       self.selection = "uploaded font failed; bundled fallback"
@@ -345,6 +351,7 @@ end
 function VectorFont:stats()
   local base = {
     family = self.family,
+    face = self.face,
     path = self.font_path,
     source = self.source,
     match = self.match,
