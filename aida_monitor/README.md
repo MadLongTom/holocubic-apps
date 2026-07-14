@@ -1,101 +1,102 @@
 # AIDA Monitor
 
-Lua/LVGL app for displaying AIDA64 RemoteSensor values. The PC only needs AIDA64 running; this app connects directly to AIDA64's HTTP SSE endpoint.
+HoloCubic app that renders the **AIDA64 RemoteSensor LCD layout itself**, instead of mapping a fixed list of sensor names to a hard-coded dashboard.
+
+The app first downloads the HTML layout from `/`, creates the corresponding 320×240 LVGL objects, and then applies live updates from `/sse`. Changing the LCD layout in AIDA64 and clicking **Apply** emits `ReLoad`; the device automatically downloads and rebuilds the layout.
+
+## Supported RemoteSensor features
+
+- Static labels and Simple Sensor Items
+- Composite sensor label/value/unit items
+- Horizontal bars, including AIDA64 foreground/background gradients
+- Line Graph, Area Graph, and Histogram Graph
+- Arc Gauge
+- Static PNG/JPEG/BMP images and animated GIF resources served by AIDA64
+- Multiple LCD pages and live `PageN` switching
+- Dynamic layout reload without reinstalling the app
+
+This target is the complete **RemoteSensor LCD** feature set. SensorPanel-only Custom Gauges are not emitted by the RemoteSensor web protocol; use AIDA64 Arc Gauge instead.
 
 ## AIDA64 setup
 
-1. Open AIDA64.
-2. Go to `File -> Preferences -> Hardware Monitoring -> LCD`.
-3. Enable RemoteSensor/LCD support.
-4. Open `设置 > LCD > LCD 项目 > 导入` and import `holo-aida.rslcd`.
-5. The profile uses labels that match `config.lua`, for example:
-   - `CPU Usage`
-   - `CPU Frequency`
-   - `CPU Temperature`
-   - `GPU Usage`
-   - `GPU Frequency`
-   - `GPU Temperature`
-   - `Memory Usage`
-   - `VRAM Usage`
-   - `CPU Fan`
+1. Open `File → Preferences → Hardware Monitoring → LCD`.
+2. Enable RemoteSensor support.
+3. Set the RemoteSensor port (this checkout defaults to `9999`).
+4. Set Preview Resolution to **320 × 240**.
+5. Use AIDA64's normal LCD Items editor to build the screen and pages.
+6. Click **Apply**.
 
-RemoteSensor commonly exposes an SSE stream at:
+You should now be able to open both URLs from another LAN device:
 
 ```text
-http://<pc-ip>:80/sse
+http://<aida-host>:9999/
+http://<aida-host>:9999/sse
 ```
 
-If port 80 is busy, set another RemoteSensor port in AIDA64 and update `config.lua`.
+The included `package/holo-aida.rslcd` is only an optional starter layout. Importing it is no longer required.
 
-If `/sse` only shows `data: ReLoad`, RemoteSensor is running but no sensor item data is being emitted yet. Import the profile from `设置 > LCD > LCD 项目 > 导入`, click `Apply`, then refresh `/sse`; it should become a longer line such as `data: Page0|{|}Simple1|CPU Usage 12%...`.
+## Device configuration
 
-## Configure
+Open the AIDA Monitor management page from HoloCubic WebUI. It exposes:
 
-Open the app Web control page from the launcher, enter the IP address of the PC running AIDA64, then save. The page writes `config.lua` and reconnects the stream.
+- AIDA64 host/IP
+- RemoteSensor port
+- Layout path (normally `/`)
+- SSE path (normally `/sse`)
+- Runtime status, active page, page count, and parsed item count
 
-You can still edit `package/config.lua` manually:
+The defaults in this checkout are:
 
 ```lua
-config.host = "192.168.31.100"
-config.port = 80
+config.host = "192.168.0.232"
+config.port = 9999
+config.layout_path = "/"
+config.path = "/sse"
 ```
 
-If a value does not show up, add the exact LCD label to that metric's `aliases` list.
+## Rendering model
 
-## Import the AIDA64 LCD profile
+RemoteSensor uses browser coordinates and does not put a canonical canvas size into the HTML response. The app therefore uses AIDA64's 320×240 preview coordinates **1:1 with no scaling**. Content outside the device viewport is clipped just like a 320×240 browser viewport.
 
-Open the app Web control page and download `holo-aida.rslcd`, or use the copy in `package/holo-aida.rslcd`.
+AIDA64 font size, color, alignment, style metadata, positions, gradients, histories, scales, grids, frames, and active page are parsed. Desktop font family names and bold/italic faces such as Tahoma/Arial are mapped to fonts available in the HoloCubic firmware, so glyph metrics and face styling can differ slightly from a desktop browser.
 
-In AIDA64, import it from:
+Remote images are stored under `/sd/apps/aida_monitor/cache`. A layout `ReLoad` rebuilds the UI and refreshes the resources so replacing an image under the same filename is reflected on the device.
+
+## Install
+
+Upload the package directory to `/sd/apps/aida_monitor` and rescan apps. Required runtime files are:
 
 ```text
-设置 > LCD > LCD 项目 > 导入
+main.lua
+aida_layout.lua
+aida_renderer.lua
+aida_client.lua
+config.lua
+web.lua
+app.info
+main.png
+info.html
 ```
 
-After importing, click `Apply`. The browser URL `http://<pc-ip>:80/sse` should show `data:` lines containing labels such as `CPU Usage`, `GPU Temperature`, and `Memory Usage`.
+## Tests
 
-## Install to device
-
-This app follows the project app layout:
-
-```text
-aida_monitor/package/app.info
-aida_monitor/package/main.lua
-aida_monitor/package/aida_client.lua
-aida_monitor/package/config.lua
-aida_monitor/package/main.png
-aida_monitor/package/info.html
-```
-
-Upload the `package` contents to:
-
-```text
-/sd/apps/aida_monitor
-```
-
-Minimum files:
-
-```text
-/sd/apps/aida_monitor/main.lua
-/sd/apps/aida_monitor/aida_client.lua
-/sd/apps/aida_monitor/config.lua
-/sd/apps/aida_monitor/web.lua
-/sd/apps/aida_monitor/app.info
-/sd/apps/aida_monitor/main.png
-/sd/apps/aida_monitor/info.html
-/sd/apps/aida_monitor/holo-aida.rslcd
-```
-
-Then rescan apps and launch `aida_monitor`.
-
-Or run the helper from this folder:
+The protocol fixture covers labels, images, composite items, bars, all three graph types, Arc Gauge, two pages, `ReLoad`, HTML entity decoding, and renderer updates:
 
 ```powershell
-.\deploy.ps1 -Device http://192.168.31.200 -Launch
+npx -y -p fengari-node-cli fengari aida_monitor/tests/protocol_test.lua
 ```
 
-## Notes
+Syntax check:
 
-- This app parses AIDA64 RemoteSensor `data:` lines split by `{|}`.
-- It automatically reconnects when the stream closes or no data arrives for a few seconds.
-- The HOME key exits the app when available.
+```powershell
+npx -y luaparse -q aida_monitor/package/aida_layout.lua
+npx -y luaparse -q aida_monitor/package/aida_renderer.lua
+npx -y luaparse -q aida_monitor/package/aida_client.lua
+```
+
+## Official AIDA64 references
+
+- [RemoteSensor LCD for smartphones and tablets](https://forums.aida64.com/topic/2636-remotesensor-lcd-for-smartphones-and-tablets/)
+- [External display support](https://www.aida64.com/products/features/external-display-support)
+- [AIDA64 LCD Guide](https://download.aida64.com/resources/lcd/aida64_lcd_guide.pdf)
+- [RemoteSensor Custom Gauge limitation](https://forums.aida64.com/topic/10160-remotesensor/)
