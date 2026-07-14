@@ -23,6 +23,8 @@ static void image_stb_free(void *ptr);
 
 #define STBI_NO_STDIO
 #define STBI_NO_SIMD
+#define STBI_NO_THREAD_LOCALS
+#define STBI_ASSERT(value) ((void)0)
 #define STBI_MAX_DIMENSIONS 2048
 #define STBI_ONLY_PNG
 #define STBI_ONLY_JPEG

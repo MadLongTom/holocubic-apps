@@ -1164,7 +1164,7 @@ function Renderer:build()
       self.font_error = tostring(surface_error or "software surface unavailable")
     else
       self.software_surface = surface
-      if self.layout.background_image then
+      if self.layout.background_image and self.vector_font.layered_surface then
         local background_surface, background_error = self.vector_font:surface_create(
           320, 240, self.layout.background or 0)
         if background_surface then
@@ -1178,6 +1178,9 @@ function Renderer:build()
           self.last_image_error = tostring(background_error or "background surface unavailable")
           self.image_skipped = self.image_skipped + 1
         end
+      elseif self.layout.background_image then
+        self.last_image_error = "font module does not provide background composition"
+        self.image_skipped = self.image_skipped + 1
       end
       self.page_canvases = {}
       for index = 1, self.layout.page_count do

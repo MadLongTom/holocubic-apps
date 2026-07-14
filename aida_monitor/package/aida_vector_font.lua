@@ -52,6 +52,7 @@ function VectorFont.new(config)
     module = nil,
     ready = false,
     surface_ready = false,
+    layered_surface = false,
     surfaces = {},
     error = "",
   }, VectorFont)
@@ -75,14 +76,15 @@ function VectorFont.new(config)
   self.surface_ready = type(module_or_error.surface_create) == "function"
     and type(module_or_error.surface_free) == "function"
     and type(module_or_error.surface_clear) == "function"
-    and type(module_or_error.surface_copy) == "function"
-    and type(module_or_error.surface_image) == "function"
     and type(module_or_error.surface_rect) == "function"
     and type(module_or_error.surface_circle) == "function"
     and type(module_or_error.surface_line) == "function"
     and type(module_or_error.surface_arc) == "function"
     and type(module_or_error.surface_text) == "function"
     and type(module_or_error.surface_pixels) == "function"
+  self.layered_surface = self.surface_ready
+    and type(module_or_error.surface_copy) == "function"
+    and type(module_or_error.surface_image) == "function"
   return self
 end
 
@@ -215,6 +217,7 @@ function VectorFont:stats()
     engine = self.ready and "stb_truetype" or "firmware fallback",
     loaded = self.ready,
     surface_ready = self.surface_ready,
+    layered_surface = self.layered_surface,
     subpixel = self.subpixel_order,
     error = self.error,
   }
