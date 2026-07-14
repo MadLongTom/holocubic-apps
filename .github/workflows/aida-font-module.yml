@@ -19,11 +19,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure ESP32-S3 module
+        shell: bash
         working-directory: aida_monitor/src
-        run: idf.py set-target esp32s3 && idf.py reconfigure
+        run: |
+          . "${IDF_PATH:-/opt/esp/idf}/export.sh"
+          idf.py set-target esp32s3
+          idf.py reconfigure
       - name: Build shared object
+        shell: bash
         working-directory: aida_monitor/src
-        run: cmake --build build --target so --parallel 2
+        run: |
+          . "${IDF_PATH:-/opt/esp/idf}/export.sh"
+          cmake --build build --target so --parallel 2
       - name: Stage module
         run: |
           mkdir -p artifact
@@ -34,4 +41,3 @@ jobs:
           name: aida-font-esp32s3
           path: artifact/aida_font.so
           if-no-files-found: error
-
