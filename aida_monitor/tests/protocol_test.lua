@@ -19,6 +19,7 @@ assert(model.items.Gph5.params.graph_type == "AG", "area graph")
 assert(model.items.Gph6.params.graph_type == "HG", "hist graph")
 assert(model.items.Arc7.params.thickness == 10, "arc thickness")
 assert(model.items.Image1.src == "probe.png", "image source")
+assert(model.items.Image1.geometry.w == 16 and model.items.Image1.geometry.h == 16, "image display size")
 
 local payload = "Page0{|}SIV3|42{|}Bar3p|42|#202020,#151515|#00FF00,#00AA00{|}Gph4p|42|{|}Gph5p|42|{|}Gph6p|42|{|}Arc7p|42|42|#202020|#00FF00{|}Simple11|CPU Temp 48&deg;C{|}"
 local sample = AidaClient.parse_remote_payload(payload)
@@ -70,6 +71,14 @@ lv_canvas_draw_text = function() end
 lv_canvas_draw_arc = function() end
 
 local Renderer = dofile("aida_monitor/package/aida_renderer.lua")
+local png40 = "\137PNG\13\10\26\10" .. string.char(0, 0, 0, 13) .. "IHDR"
+  .. string.char(0, 0, 0, 40, 0, 0, 0, 40)
+local png_kind, png_width, png_height = Renderer.image_info(png40)
+assert(png_kind == "png" and png_width == 40 and png_height == 40, "PNG dimensions")
+local png_large = "\137PNG\13\10\26\10" .. string.char(0, 0, 0, 13) .. "IHDR"
+  .. string.char(0, 0, 8, 112, 0, 0, 8, 108)
+local _, large_width, large_height = Renderer.image_info(png_large)
+assert(large_width == 2160 and large_height == 2156, "large PNG dimensions")
 local renderer = Renderer.new({ config = { history_points = 49 }, layout = model, root = 1 })
 renderer:build()
 renderer:apply_sample(sample)

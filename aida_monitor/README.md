@@ -62,6 +62,8 @@ AIDA64 font size, color, alignment, style metadata, positions, gradients, histor
 
 Remote images are stored under `/sd/apps/aida_monitor/cache`. A layout `ReLoad` rebuilds the UI and refreshes the resources so replacing an image under the same filename is reflected on the device.
 
+AIDA64 serves the original image file even when the generated HTML asks the browser to display it at a much smaller size. To prevent an oversized source image from exhausting the HoloCubic's memory, the app checks both the HTTP body length and the source pixel dimensions before saving or decoding it. The defaults accept up to 256 KiB and 307,200 source pixels; rejected resources render as an `IMG` placeholder and are reported by the management state API. Resize images close to their intended LCD dimensions before adding them to RemoteSensor.
+
 ## Install
 
 Upload the package directory to `/sd/apps/aida_monitor` and rescan apps. Required runtime files are:
@@ -124,7 +126,7 @@ python aida_monitor/tools/render_layout_previews.py `
 ```
 
 The local renderer mirrors the app's 1:1 positions, font-size mapping,
-gradients, graph histories, Arc Gauge, image placement, page background, and
+gradients, graph histories, Arc Gauge, Image width/height, page background, and
 SSE field updates. It uses the first GIF frame, matching a static screenshot.
 
 ## Official AIDA64 references

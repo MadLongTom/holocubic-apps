@@ -289,6 +289,230 @@ local function safe_filename(index, src)
   return tostring(index) .. "_" .. name
 end
 
+local function be16(data, offset)
+  local a, b = data:byte(offset, offset + 1)
+  if not a or not b then return nil end
+  return a * 256 + b
+end
+
+local function be32(data, offset)
+  local a, b, c, d = data:byte(offset, offset + 3)
+  if not a or not b or not c or not d then return nil end
+  return ((a * 256 + b) * 256 + c) * 256 + d
+end
+
+local function le16(data, offset)
+  local a, b = data:byte(offset, offset + 1)
+  if not a or not b then return nil end
+  return a + b * 256
+end
+
+local function le32(data, offset)
+  local a, b, c, d = data:byte(offset, offset + 3)
+  if not a or not b or not c or not d then return nil end
+  return a + b * 256 + c * 65536 + d * 16777216
+end
+
+local function jpeg_size(data)
+  if data:sub(1, 2) ~= "\255\216" then return nil end
+  local position = 3
+  while position + 8 <= #data do
+    if data:byte(position) ~= 0xFF then
+      position = position + 1
+    else
+      local marker = data:byte(position + 1)
+      while marker == 0xFF do
+        position = position + 1
+        marker = data:byte(position + 1)
+      end
+      if marker == 0xD8 or marker == 0xD9 then
+        position = position + 2
+      else
+        local length = be16(data, position + 2)
+        if not length or length < 2 then return nil end
+        local is_sof = marker >= 0xC0 and marker <= 0xCF
+          and marker ~= 0xC4 and marker ~= 0xC8 and marker ~= 0xCC
+        if is_sof then
+          local height = be16(data, position + 5)
+          local width = be16(data, position + 7)
+          if width and height then return "jpeg", width, height end
+          return nil
+        end
+        position = position + 2 + length
+      end
+    end
+  end
+  return nil
+end
+
+local function image_info(data)
+  if type(data) ~= "string" then return nil, nil, nil, "not binary data" end
+  if #data >= 24 and data:sub(1, 8) == "\137PNG\13\10\26\10" then
+    local width, height = be32(data, 17), be32(data, 21)
+    if width and height and width > 0 and height > 0 then return "png", width, height end
+    return nil, nil, nil, "invalid PNG dimensions"
+  end
+  if #data >= 10 and (data:sub(1, 6) == "GIF87a" or data:sub(1, 6) == "GIF89a") then
+    local width, height = le16(data, 7), le16(data, 9)
+    if width and height and width > 0 and height > 0 then return "gif", width, height end
+    return nil, nil, nil, "invalid GIF dimensions"
+  end
+  if #data >= 26 and data:sub(1, 2) == "BM" then
+    local width, height = le32(data, 19), le32(data, 23)
+    if height and height >= 2147483648 then height = 4294967296 - height end
+    if width and height and width > 0 and height > 0 then return "bmp", width, height end
+    return nil, nil, nil, "invalid BMP dimensions"
+  end
+  local kind, width, height = jpeg_size(data)
+  if kind then return kind, width, height end
+  return nil, nil, nil, "unsupported or invalid image"
+end
+
+local function callback_string_arg(...)
+  for index = 1, select("#", ...) do
+    local value = select(index, ...)
+    if type(value) == "string" then return value end
+  end
+  return nil
+end
+
+local function parse_http_url(url)
+  local authority, path = tostring(url or ""):match("^http://([^/]+)(/.*)$")
+  if not authority then authority = tostring(url or ""):match("^http://([^/]+)$") path = "/" end
+  if not authority then return nil, nil, nil, "only http:// image URLs are supported" end
+  local host, port = authority:match("^([^:]+):(%d+)$")
+  if not host then host, port = authority, 80 end
+  return host, tonumber(port), path or "/"
+end
+
+local function bounded_http_get(url, max_bytes, timeout_ms, callback)
+  if not net or not net.createConnection then
+    return false, "TCP module missing"
+  end
+  local host, port, path, parse_error = parse_http_url(url)
+  if not host then return false, parse_error end
+
+  local connection
+  local timeout_timer
+  local completed = false
+  local header_buffer = ""
+  local body_parts = {}
+  local body_bytes = 0
+  local headers = nil
+  local content_length = nil
+
+  local function stop_timeout()
+    if timeout_timer then pcall(function() timeout_timer:unregister() end) timeout_timer = nil end
+  end
+
+  local function finish(ok, body, meta, reason)
+    if completed then return end
+    completed = true
+    stop_timeout()
+    if connection then pcall(function() connection:close() end) end
+    callback(ok, body, meta, reason)
+  end
+
+  local function parse_headers(raw)
+    local result = {}
+    local status = tonumber(raw:match("^HTTP/%d+%.%d+%s+(%d+)") or 0)
+    for line in raw:gmatch("[^\r\n]+") do
+      local key, value = line:match("^([^:]+):%s*(.-)%s*$")
+      if key then result[key:lower()] = value end
+    end
+    result.status = status
+    return result
+  end
+
+  local function accept_body(chunk)
+    if not headers then
+      header_buffer = header_buffer .. chunk
+      if #header_buffer > 16384 then finish(false, nil, nil, "image response headers too large") return end
+      local first, last = header_buffer:find("\r\n\r\n", 1, true)
+      if not first then return end
+      local raw_headers = header_buffer:sub(1, first - 1)
+      local first_body = header_buffer:sub(last + 1)
+      header_buffer = ""
+      headers = parse_headers(raw_headers)
+      if headers.status ~= 200 then finish(false, nil, headers, "image HTTP " .. tostring(headers.status)) return end
+      if headers["transfer-encoding"] and headers["transfer-encoding"]:lower():find("chunked", 1, true) then
+        finish(false, nil, headers, "chunked image response unsupported")
+        return
+      end
+      content_length = tonumber(headers["content-length"])
+      if content_length and content_length > max_bytes then
+        finish(false, nil, headers, "image is " .. tostring(content_length) .. " bytes; limit is " .. tostring(max_bytes))
+        return
+      end
+      chunk = first_body
+    end
+    if chunk and #chunk > 0 then
+      body_bytes = body_bytes + #chunk
+      if body_bytes > max_bytes then finish(false, nil, headers, "image exceeds " .. tostring(max_bytes) .. " bytes") return end
+      body_parts[#body_parts + 1] = chunk
+    end
+    if content_length and body_bytes >= content_length then
+      finish(true, table.concat(body_parts):sub(1, content_length), headers, nil)
+    end
+  end
+
+  local ok, connection_or_error = pcall(function()
+    if net.TCP then return net.createConnection(net.TCP, false) end
+    return net.createConnection()
+  end)
+  if not ok or not connection_or_error then
+    return false, "socket create failed: " .. tostring(connection_or_error)
+  end
+  connection = connection_or_error
+  local function abort_start(reason)
+    completed = true
+    stop_timeout()
+    pcall(function() connection:close() end)
+    return false, reason
+  end
+  local function bind(event, handler)
+    local bound = pcall(function() connection:on(event, handler) end)
+    return bound
+  end
+  if not bind("connection", function()
+    local request = table.concat({
+      "GET " .. path .. " HTTP/1.1",
+      "Host: " .. host .. ":" .. tostring(port),
+      "Accept: image/png,image/jpeg,image/gif,image/bmp",
+      "Accept-Encoding: identity",
+      "Cache-Control: no-cache",
+      "Connection: close", "", "",
+    }, "\r\n")
+    local sent, send_error = pcall(function() connection:send(request) end)
+    if not sent then finish(false, nil, nil, "image request failed: " .. tostring(send_error)) end
+  end) then return abort_start("socket connection handler unavailable") end
+  if not bind("receive", function(...)
+    local chunk = callback_string_arg(...)
+    if chunk and #chunk > 0 and not completed then
+      local handled, handle_error = pcall(accept_body, chunk)
+      if not handled then finish(false, nil, headers, "image receive failed: " .. tostring(handle_error)) end
+    end
+  end) then return abort_start("socket receive handler unavailable") end
+  if not bind("disconnection", function()
+    if completed then return end
+    if headers and body_bytes > 0 and (not content_length or body_bytes >= content_length) then
+      finish(true, table.concat(body_parts), headers, nil)
+    else
+      finish(false, nil, headers, "image connection closed early")
+    end
+  end) then return abort_start("socket disconnection handler unavailable") end
+
+  if tmr and tmr.create then
+    timeout_timer = tmr.create()
+    timeout_timer:alarm(timeout_ms or 7000, tmr.ALARM_SINGLE, function()
+      finish(false, nil, headers, "image timeout")
+    end)
+  end
+  local connected, connect_error = pcall(function() connection:connect(port, host) end)
+  if not connected then return abort_start("image connect failed: " .. tostring(connect_error)) end
+  return true
+end
+
 local function create_image_object(parent, path)
   local is_gif = path:lower():match("%.gif$") ~= nil
   if is_gif and lv_gif_create and lv_gif_set_src then
@@ -315,6 +539,9 @@ function Renderer.new(opts)
   self.views = {}
   self.image_queue = {}
   self.image_busy = false
+  self.image_loaded = 0
+  self.image_skipped = 0
+  self.last_image_error = ""
   self.active_page = 1
   return self
 end
@@ -403,35 +630,85 @@ function Renderer:load_next_image()
   local cache_dir = self.config.cache_dir or "/sd/apps/aida_monitor/cache"
   if file and file.mkdir then call(file.mkdir, cache_dir) end
   local path = cache_dir .. "/" .. safe_filename(pending.item.id:match("%d+") or 1, pending.item.src)
-  local function attach()
+  local function placeholder(reason)
+    self.image_skipped = self.image_skipped + 1
+    self.last_image_error = tostring(reason or "image unavailable")
+    self.log("image_skipped", pending.item.src, self.last_image_error)
+    local g = pending.item.geometry
+    local width = g.w > 0 and g.w or 40
+    local height = g.h > 0 and g.h or 40
+    local inner_width = math.max(1, width - 2)
+    local panel = make_panel(pending.page, g.x, g.y, width, height, 0x151515, 255)
+    call(lv_obj_set_style_border_width, panel, 1, MAIN)
+    call(lv_obj_set_style_border_color, panel, 0xFF5D5D, MAIN)
+    local label = make_label(panel, { x = 1, y = math.max(0, math.floor(height / 2) - 6), w = inner_width }, {
+      text = "IMG", color = 0xFF5D5D, font = { size = 8 }, align = "center",
+    }, inner_width)
+    pending.view.object = panel
+    pending.view.placeholder = label
+  end
+  local function attach(info)
     local object = create_image_object(pending.page, path)
     pending.view.object = object
-    if object then call(lv_obj_set_pos, object, pending.item.geometry.x, pending.item.geometry.y) end
+    if object then
+      local g = pending.item.geometry
+      call(lv_obj_set_pos, object, g.x, g.y)
+      if lv_img_set_pivot then call(lv_img_set_pivot, object, 0, 0) end
+      if lv_img_set_zoom and info and info.width > 0 and info.height > 0 and (g.w > 0 or g.h > 0) then
+        local scale_x = g.w > 0 and g.w / info.width or nil
+        local scale_y = g.h > 0 and g.h / info.height or nil
+        local scale = scale_x and scale_y and math.min(scale_x, scale_y) or scale_x or scale_y
+        call(lv_img_set_zoom, object, math.max(1, math.floor(scale * 256 + 0.5)))
+      end
+      self.image_loaded = self.image_loaded + 1
+    else
+      placeholder("image widget unavailable")
+    end
   end
-  if not http or not http.get or not self.resource_url then
+  if not self.resource_url then
     if file and file.exists then
       local ok, exists = pcall(file.exists, path)
-      if ok and exists then attach() end
+      if ok and exists then placeholder("network unavailable; cached image not trusted")
+      else placeholder("image resource URL missing") end
+    else
+      placeholder("image resource URL missing")
     end
     self:load_next_image()
     return
   end
   self.image_busy = true
-  local headers = "Accept: image/*\r\nAccept-Encoding: identity\r\nCache-Control: no-cache\r\n\r\n"
-  local ok = pcall(function()
-    http.get(self.resource_url(pending.item.src), headers, function(code, body)
+  local started, start_error = bounded_http_get(self.resource_url(pending.item.src),
+    tonumber(self.config.max_image_bytes) or 262144,
+    tonumber(self.config.image_timeout_ms) or 7000,
+    function(ok, body, headers, reason)
       self.image_busy = false
-      if tonumber(code) == 200 and type(body) == "string" and #body > 0 and file and file.putcontents then
-        local saved, result = pcall(file.putcontents, path, body)
-        if saved and result ~= false then attach() else self.log("image_save_error", path) end
+      if not ok then
+        placeholder(reason)
+        self:load_next_image()
+        return
+      end
+      local kind, width, height, info_error = image_info(body)
+      local max_pixels = tonumber(self.config.max_image_pixels) or 307200
+      if not kind then
+        placeholder(info_error)
+      elseif width * height > max_pixels then
+        placeholder("image is " .. tostring(width) .. "x" .. tostring(height)
+          .. "; pixel limit is " .. tostring(max_pixels))
+      elseif not file or not file.putcontents then
+        placeholder("file API missing")
       else
-        self.log("image_http_error", pending.item.src, code)
+        local saved, result = pcall(file.putcontents, path, body)
+        if saved and result ~= false then
+          attach({ kind = kind, width = width, height = height })
+        else
+          placeholder("image save failed")
+        end
       end
       self:load_next_image()
     end)
-  end)
-  if not ok then
+  if not started then
     self.image_busy = false
+    placeholder(start_error or "image request could not start")
     self:load_next_image()
   end
 end
@@ -482,6 +759,9 @@ function Renderer:snapshot()
     pages = #self.pages,
     items = self.layout.item_count or 0,
     counts = self.layout.counts or {},
+    images_loaded = self.image_loaded,
+    images_skipped = self.image_skipped,
+    image_error = self.last_image_error,
   }
 end
 
@@ -491,5 +771,7 @@ function Renderer:destroy()
   self.pages = {}
   self.views = {}
 end
+
+Renderer.image_info = image_info
 
 return Renderer

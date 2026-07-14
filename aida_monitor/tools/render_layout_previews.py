@@ -220,12 +220,19 @@ def parse_layout(document: str, source_base: str | None = None,
             items[item_id + "p"] = items[item_id]
             continue
 
-        match = re.search(r'<div style="([^"]*)"><img[^>]*src="([^"]+)"[^>]*></div>', line)
+        match = re.search(r'<div style="([^"]*)">(<img[^>]*src="([^"]+)"[^>]*>)</div>', line)
         if match:
-            raw_style, src = match.groups()
+            raw_style, tag, src = match.groups()
             image_index += 1
             style = parse_style(raw_style)
-            add(Item(f"Image{image_index}", "image", page, geometry(style), style,
+            geom = geometry(style)
+            width = re.search(r'\bwidth\s*=\s*["\']?(\d+)', tag, re.IGNORECASE)
+            height = re.search(r'\bheight\s*=\s*["\']?(\d+)', tag, re.IGNORECASE)
+            if width:
+                geom["w"] = int(width.group(1))
+            if height:
+                geom["h"] = int(height.group(1))
+            add(Item(f"Image{image_index}", "image", page, geom, style,
                      {"src": html_module.unescape(src)}))
 
     for call in re.finditer(r'DrawGraph\((.*?)\);', document):
@@ -507,6 +514,13 @@ def render_page(layout: Layout, page_index: int) -> Image.Image:
         elif item.kind == "image":
             resource = load_resource(layout, item.data["src"])
             if resource:
+                target_width, target_height = g["w"], g["h"]
+                if target_width > 0 or target_height > 0:
+                    if target_width <= 0:
+                        target_width = max(1, round(resource.width * target_height / resource.height))
+                    if target_height <= 0:
+                        target_height = max(1, round(resource.height * target_width / resource.width))
+                    resource = resource.resize((target_width, target_height), Image.Resampling.LANCZOS)
                 image.alpha_composite(resource, (g["x"], g["y"]))
             else:
                 draw.rectangle((g["x"], g["y"], g["x"] + 15, g["y"] + 15), outline="#FF00FF")

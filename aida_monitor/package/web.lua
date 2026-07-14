@@ -89,6 +89,9 @@ config.reload_delay_ms = %d
 config.max_layout_bytes = %d
 config.history_points = %d
 config.cache_dir = %q
+config.max_image_bytes = %d
+config.max_image_pixels = %d
+config.image_timeout_ms = %d
 config.serial_log = %s
 
 return config
@@ -106,6 +109,9 @@ return config
     tonumber(config.max_layout_bytes) or 196608,
     tonumber(config.history_points) or 96,
     tostring(config.cache_dir or "/sd/apps/aida_monitor/cache"),
+    tonumber(config.max_image_bytes) or 262144,
+    tonumber(config.max_image_pixels) or 307200,
+    tonumber(config.image_timeout_ms) or 7000,
     config.serial_log == false and "false" or "true")
 end
 
@@ -126,21 +132,21 @@ local function build_html(api)
 <title>AIDA RemoteSensor</title>
 <style>
 :root{color-scheme:dark;--bg:#080b10;--panel:#10151d;--line:#273344;--text:#edf4ff;--muted:#91a0b5;--cyan:#49b6ff;--green:#55d894;--red:#ff6b5f}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,"Microsoft YaHei",monospace}.page{width:min(920px,calc(100% - 24px));margin:auto;padding:22px 0}.head{display:flex;justify-content:space-between;gap:16px;align-items:end;margin-bottom:14px}h1{margin:0;font-size:24px}.sub{color:var(--muted);margin:3px 0 0}.grid{display:grid;grid-template-columns:1fr .86fr;gap:12px}.panel{border:1px solid var(--line);background:var(--panel);padding:16px}.panel h2{font-size:15px;margin:0 0 13px;color:var(--cyan)}.form{display:grid;gap:12px}.row{display:grid;grid-template-columns:1fr 130px;gap:10px}label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}input{width:100%;height:40px;border:1px solid var(--line);background:#090d13;color:var(--text);padding:0 10px;font:inherit;outline:none}input:focus{border-color:var(--cyan)}button,a.button{height:40px;border:1px solid var(--line);background:#141c27;color:var(--text);padding:0 13px;font:inherit;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center}.primary{background:var(--cyan);border-color:var(--cyan);color:#05111a;font-weight:800}.actions{display:flex;gap:8px;flex-wrap:wrap}.status{min-height:21px;color:var(--muted)}.status.ok{color:var(--green)}.status.err{color:var(--red)}.runtime{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:13px}.metric{border:1px solid var(--line);background:#090d13;padding:9px}.metric b{display:block;color:var(--cyan);font-size:18px}.metric span{color:var(--muted);font-size:11px}.steps{margin:0;padding-left:20px;color:var(--muted)}.steps li{margin:9px 0}.steps strong{color:var(--text)}code{color:var(--green);overflow-wrap:anywhere}.note{border-left:2px solid var(--cyan);padding:8px 10px;background:#0b121b;color:var(--muted)}@media(max-width:720px){.grid{grid-template-columns:1fr}.row{grid-template-columns:1fr}.head{align-items:start}.runtime{grid-template-columns:repeat(3,1fr)}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,"Microsoft YaHei",monospace}.page{width:min(920px,calc(100% - 24px));margin:auto;padding:22px 0}.head{display:flex;justify-content:space-between;gap:16px;align-items:end;margin-bottom:14px}h1{margin:0;font-size:24px}.sub{color:var(--muted);margin:3px 0 0}.grid{display:grid;grid-template-columns:1fr .86fr;gap:12px}.panel{border:1px solid var(--line);background:var(--panel);padding:16px}.panel h2{font-size:15px;margin:0 0 13px;color:var(--cyan)}.form{display:grid;gap:12px}.row{display:grid;grid-template-columns:1fr 130px;gap:10px}label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}input{width:100%;height:40px;border:1px solid var(--line);background:#090d13;color:var(--text);padding:0 10px;font:inherit;outline:none}input:focus{border-color:var(--cyan)}button,a.button{height:40px;border:1px solid var(--line);background:#141c27;color:var(--text);padding:0 13px;font:inherit;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center}.primary{background:var(--cyan);border-color:var(--cyan);color:#05111a;font-weight:800}.actions{display:flex;gap:8px;flex-wrap:wrap}.status{min-height:21px;color:var(--muted)}.status.ok{color:var(--green)}.status.err{color:var(--red)}.runtime{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-bottom:13px}.metric{border:1px solid var(--line);background:#090d13;padding:9px}.metric b{display:block;color:var(--cyan);font-size:18px}.metric b.warn{color:var(--red)}.metric span{color:var(--muted);font-size:11px}.steps{margin:0;padding-left:20px;color:var(--muted)}.steps li{margin:9px 0}.steps strong{color:var(--text)}code{color:var(--green);overflow-wrap:anywhere}.note{border-left:2px solid var(--cyan);padding:8px 10px;background:#0b121b;color:var(--muted)}@media(max-width:720px){.grid{grid-template-columns:1fr}.row{grid-template-columns:1fr}.head{align-items:start}.runtime{grid-template-columns:repeat(2,1fr)}}
 </style></head><body><main class="page">
 <header class="head"><div><h1>AIDA64 // REMOTESENSOR</h1><p class="sub">HoloCubic 动态 LCD 布局桥接</p></div><a class="button" href="/main">返回主界面</a></header>
 <section class="grid"><section class="panel"><h2>&gt; CONNECTION</h2>
-<div class="runtime"><div class="metric"><b id="rtStatus">--</b><span>STATUS</span></div><div class="metric"><b id="rtPage">--</b><span>PAGE</span></div><div class="metric"><b id="rtItems">--</b><span>ITEMS</span></div></div>
+<div class="runtime"><div class="metric"><b id="rtStatus">--</b><span>STATUS</span></div><div class="metric"><b id="rtPage">--</b><span>PAGE</span></div><div class="metric"><b id="rtItems">--</b><span>ITEMS</span></div><div class="metric"><b id="rtImages">--</b><span>IMAGES</span></div></div>
 <form class="form" id="form"><div class="row"><div><label>主机 IP / Host</label><input id="host" required placeholder="192.168.0.232"></div><div><label>RemoteSensor 端口</label><input id="port" inputmode="numeric" required placeholder="9999"></div></div><div class="row"><div><label>布局路径</label><input id="layout" value="/"></div><div><label>SSE 路径</label><input id="stream" value="/sse"></div></div><div class="actions"><button class="primary" type="submit">保存 · 重载布局</button><button type="button" id="openLayout">打开布局</button><button type="button" id="openStream">打开数据流</button></div><div id="status" class="status">正在读取设备状态...</div></form></section>
 <aside class="panel"><h2>&gt; AIDA64 SETUP</h2><ol class="steps"><li>在 <strong>Preferences → Hardware Monitoring → LCD</strong> 启用 RemoteSensor。</li><li>端口设置为 <strong>9999</strong>，Preview Resolution 设置为 <strong>320 × 240</strong>。</li><li>直接使用 AIDA64 的 LCD Items 编辑器添加标签、图片、柱条、曲线、Arc Gauge 和页面。</li><li>点击 Apply。设备收到 <code>ReLoad</code> 后会自动重新读取整个布局。</li></ol><p class="note">设备按 320×240 原始坐标渲染，不缩放。SensorPanel 专用 Custom Gauge 不属于 RemoteSensor 协议；请使用 Arc Gauge。</p><code id="preview">http://--:9999/</code></aside></section></main>
 <script>
 const API="]=] .. api .. [=[";const $=id=>document.getElementById(id);let state={};
 function path(v,d){v=(v||"").trim()||d;return v[0]==="/"?v:"/"+v}function base(){return "http://"+$("host").value.trim()+":"+$("port").value.trim()}function sync(){ $("preview").textContent=base()+path($("layout").value,"/") }
 function tone(text,kind){$("status").textContent=text;$("status").className="status "+(kind||"")}
-function apply(d){state=d;$("host").value=d.host||"";$("port").value=d.port||9999;$("layout").value=d.layout_path||"/";$("stream").value=d.path||"/sse";$("rtStatus").textContent=d.status||"--";$("rtPage").textContent=(d.page||0)+"/"+(d.pages||0);$("rtItems").textContent=d.items||0;sync()}
-async function load(){let r=await fetch(API+"/state?_="+Date.now(),{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status);apply(await r.json());tone("设备状态已同步。","ok")}
+function runtime(d){$("rtStatus").textContent=d.status||"--";$("rtPage").textContent=(d.page||0)+"/"+(d.pages||0);$("rtItems").textContent=d.items||0;let n=$("rtImages"),skip=d.images_skipped||0;n.textContent=(d.images_loaded||0)+"/"+((d.images_loaded||0)+skip);n.className=skip?"warn":""}function apply(d){state=d;$("host").value=d.host||"";$("port").value=d.port||9999;$("layout").value=d.layout_path||"/";$("stream").value=d.path||"/sse";runtime(d);sync()}
+async function load(){let r=await fetch(API+"/state?_="+Date.now(),{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status);let d=await r.json();apply(d);tone(d.image_error?"图像已安全跳过："+d.image_error:"设备状态已同步。",d.image_error?"err":"ok")}
 $("form").addEventListener("submit",async e=>{e.preventDefault();try{tone("正在保存并重新读取布局...");let q=new URLSearchParams({host:$("host").value.trim(),port:$("port").value.trim(),layout_path:path($("layout").value,"/"),path:path($("stream").value,"/sse")});let r=await fetch(API+"/save?"+q,{cache:"no-store"});let d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||"保存失败");apply(d);tone("已保存，正在重载 AIDA64 布局。","ok")}catch(err){tone(err.message,"err")}});
-$("openLayout").onclick=()=>window.open(base()+path($("layout").value,"/"),"_blank");$("openStream").onclick=()=>window.open(base()+path($("stream").value,"/sse"),"_blank");["host","port","layout","stream"].forEach(id=>$(id).addEventListener("input",sync));load().catch(e=>tone(e.message,"err"));setInterval(()=>fetch(API+"/state?_="+Date.now(),{cache:"no-store"}).then(r=>r.json()).then(d=>{$("rtStatus").textContent=d.status||"--";$("rtPage").textContent=(d.page||0)+"/"+(d.pages||0);$("rtItems").textContent=d.items||0}).catch(()=>{}),3000);
+$("openLayout").onclick=()=>window.open(base()+path($("layout").value,"/"),"_blank");$("openStream").onclick=()=>window.open(base()+path($("stream").value,"/sse"),"_blank");["host","port","layout","stream"].forEach(id=>$(id).addEventListener("input",sync));load().catch(e=>tone(e.message,"err"));setInterval(()=>fetch(API+"/state?_="+Date.now(),{cache:"no-store"}).then(r=>r.json()).then(runtime).catch(()=>{}),3000);
 </script></body></html>]=]
 end
 
@@ -166,6 +172,9 @@ function Web.new(opts)
       status = runtime.status or "STARTING", detail = runtime.detail or "",
       page = runtime.page or 0, pages = runtime.pages or 0, items = runtime.items or 0,
       counts = runtime.counts or {}, last_event_ms = runtime.last_event_ms or 0,
+      images_loaded = runtime.images_loaded or 0,
+      images_skipped = runtime.images_skipped or 0,
+      image_error = runtime.image_error or "",
     }
   end
 

@@ -337,12 +337,17 @@ local function parse_image(model, page_index, line)
   end
   model.image_count = model.image_count + 1
   local style = parse_style(raw_style)
+  local item_geometry = style_geometry(style)
+  local width = tag:match('width%s*=%s*"?(%d+)')
+  local height = tag:match('height%s*=%s*"?(%d+)')
+  if tonumber(width) then item_geometry.w = tonumber(width) end
+  if tonumber(height) then item_geometry.h = tonumber(height) end
   add_item(model, page_index, {
     id = "Image" .. tostring(model.image_count),
     kind = "image",
     src = html_decode(src),
     style = style,
-    geometry = style_geometry(style),
+    geometry = item_geometry,
   })
   return true
 end

@@ -201,6 +201,9 @@ function state.snapshot()
     pages = render.pages or 0,
     items = render.items or 0,
     counts = render.counts or {},
+    images_loaded = render.images_loaded or 0,
+    images_skipped = render.images_skipped or 0,
+    image_error = render.image_error or "",
   }
 end
 
