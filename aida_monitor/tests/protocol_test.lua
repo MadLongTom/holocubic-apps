@@ -39,6 +39,20 @@ assert(layered.background_image.geometry.w == 320 and layered.background_image.g
 assert(layered.pages[1].items[1].id == "Label1" and layered.pages[1].items[2].id == "Label2",
   "z-index establishes stable page layers")
 
+local generated_background = Layout.parse([=[<html><style>body { background-color:#000 }</style><body>
+<div id="page0">
+<div style="position:absolute; left:0px; top:0px"><img width=320 height=240 src="background.png"></div>
+<span id="Simple2" style="position:absolute; left:0; top:0">LIVE</span>
+<div style="position:absolute; left:200px; top:0px"><img width=60 height=60 src="foreground.gif"></div>
+</div></body></html>]=])
+assert(generated_background and generated_background.background_image, "generated BGIMG promoted")
+assert(generated_background.background_image.src == "background.png"
+  and generated_background.background_image.page == 1, "generated background retains page scope")
+assert(generated_background.items.Image1 == nil and generated_background.items.Image2,
+  "foreground image remains a normal page layer")
+assert(#generated_background.pages[1].items == 2
+  and generated_background.pages[1].items[2].id == "Image2", "background removed from foreground DOM")
+
 local nested_sensor = Layout.parse([=[<html><style>body { background-color:#000000 }</style><body>
 <div id="SI12" style="position:absolute; left:10px; top:210px; width:200px"><div id="Bar12bg" style="position:absolute; left:0px; width:100px; height:15px; background:#333333"><span id="Bar12fg" style="display:block; width:50%; height:100%; background:#00DF00"></span></div><div style="position:absolute; left:0; top:0"><div style="width:200px; height:15px; display:table-cell"><div style="float:left; font-size:8pt; color:#00AAAA">GPU1&nbsp;显存频率</div><div style="width:40px; font-size:8pt; color:#00AAAA; float:right">&nbsp;MHz</div><div id="SIV12" style="font-size:8pt; color:#FFFFFF; float:right">15201</div></div></div></div>
 </body></html>]=])

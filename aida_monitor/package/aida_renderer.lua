@@ -955,7 +955,9 @@ function Renderer:software_render_page(page_index)
   local page = self.layout.pages[page_index]
   if not page or not self.software_surface then return false end
   local ok, err
-  if self.background_surface and self.background_ready then
+  local background_page = self.layout.background_image and self.layout.background_image.page
+  if self.background_surface and self.background_ready
+    and (background_page == nil or background_page == page_index) then
     ok, err = self.vector_font:surface_copy(self.software_surface, self.background_surface)
   else
     ok, err = self.vector_font:surface_clear(self.software_surface, self.layout.background or 0)

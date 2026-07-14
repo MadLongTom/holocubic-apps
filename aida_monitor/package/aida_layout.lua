@@ -437,6 +437,29 @@ local function parse_image(model, page_index, line)
   return true
 end
 
+local function promote_generated_background(model)
+  if model.background_image then return end
+  -- BGIMG=1 is not identified in AIDA64's generated HTML. Its observable ABI
+  -- is the first page item: an image forced to the complete preview rectangle.
+  -- Promote only that exact shape/order so ordinary large foreground images
+  -- keep their DOM stacking semantics.
+  local page = model.pages[1]
+  local item = page and page.items and page.items[1]
+  local geometry = item and item.geometry or {}
+  if not item or item.kind ~= "image" or item.order ~= 1
+    or geometry.x ~= 0 or geometry.y ~= 0
+    or geometry.w ~= 320 or geometry.h ~= 240 then
+    return
+  end
+  table.remove(page.items, 1)
+  model.items[item.id] = nil
+  item.id = "BackgroundImage"
+  item.is_background = true
+  item.fit = "stretch"
+  item.z_index = -2147483647
+  model.background_image = item
+end
+
 local function parse_graph_call(model, line)
   if not line:find('DrawGraph("Gph', 1, true) then
     return
@@ -550,6 +573,8 @@ function Layout.parse(html)
     parse_graph_call(model, line)
     parse_arc_call(model, line)
   end
+
+  promote_generated_background(model)
 
   -- AIDA normally relies on DOM order, but also permits explicit CSS z-index.
   -- Preserve source order inside each z-plane and keep the body background in
