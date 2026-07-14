@@ -9,6 +9,8 @@ local FLAG_SCROLLABLE = rawget(_G, "LV_OBJ_FLAG_SCROLLABLE")
 local FLAG_HIDDEN = rawget(_G, "LV_OBJ_FLAG_HIDDEN")
 local GRAD_VER = rawget(_G, "LV_GRAD_DIR_VER") or 1
 local CANVAS_FMT = rawget(_G, "LV_IMG_CF_TRUE_COLOR") or rawget(_G, "CANVAS_FMT_TRUE_COLOR")
+local TEXT_CANVAS_FMT = rawget(_G, "LV_IMG_CF_TRUE_COLOR_CHROMA_KEYED") or CANVAS_FMT
+local CHROMA_KEY = rawget(_G, "LV_COLOR_CHROMA_KEY") or 0x00FF00
 local BUILTIN_FONT_SIZES = { 8, 10, 12, 14, 16, 20, 24, 28 }
 
 local function call(fn, ...)
@@ -72,6 +74,33 @@ local function style_align(value)
   return ALIGN_LEFT
 end
 
+local function is_bold(value)
+  local text = tostring(value or ""):lower()
+  return text:find("bold", 1, true) ~= nil or (tonumber(text:match("(%d+)")) or 0) >= 600
+end
+
+local function parameter_text_style(params, align)
+  params = params or {}
+  return {
+    color = params.font_color or 0xFFFFFF,
+    align = align or "left",
+    font = {
+      size = tonumber(params.font_size) or 10,
+      family = params.font_family or "",
+      bold = is_bold(params.font_weight),
+      italic = tostring(params.font_style or ""):lower():find("italic", 1, true) ~= nil,
+    },
+  }
+end
+
+local function vector_text_height(text_style, available)
+  local size = tonumber(text_style and text_style.font and text_style.font.size) or 12
+  local shadow = text_style and text_style.shadow or nil
+  local shadow_pad = shadow and math.max(0, (tonumber(shadow.y) or 0) + (tonumber(shadow.blur) or 0)) or 0
+  local height = math.ceil(size * 1.28) + math.max(2, shadow_pad)
+  return math.max(1, math.min(tonumber(available) or height, height))
+end
+
 local function make_label(parent, geometry, text_style, width, renderer)
   local object = lv_label_create(parent)
   local x = geometry and geometry.x or 0
@@ -90,10 +119,11 @@ local function make_label(parent, geometry, text_style, width, renderer)
   return object
 end
 
-local function canvas_create(parent, width, height)
+local function canvas_create(parent, width, height, format)
   if not lv_canvas_create then return nil end
-  if CANVAS_FMT then
-    local ok, object = pcall(lv_canvas_create, parent, width, height, CANVAS_FMT)
+  local selected_format = format or CANVAS_FMT
+  if selected_format then
+    local ok, object = pcall(lv_canvas_create, parent, width, height, selected_format)
     if ok then return object end
   end
   local ok, object = pcall(lv_canvas_create, parent, width, height)
@@ -237,11 +267,24 @@ local function render_graph(view)
   if p.show_scale then
     local text_x = p.right_align and (right + 2) or 0
     local align = p.right_align and ALIGN_LEFT or ALIGN_RIGHT
-    draw_text(canvas, text_x, top, scale_width - 2, tostring(math.floor(maximum + 0.5)),
-      p.font_color, p.font_size, align, 255, view.renderer:font_for_size(p.font_size))
-    draw_text(canvas, text_x, math.max(top, bottom - (p.font_size or 8) - 1), scale_width - 2,
-      tostring(math.floor(minimum + 0.5)), p.font_color, p.font_size, align, 255,
-      view.renderer:font_for_size(p.font_size))
+    local text_width = math.max(1, scale_width - 2)
+    local style = parameter_text_style(p, p.right_align and "left" or "right")
+    local text_height = math.min(height, vector_text_height(style, height))
+    local background = p.show_background and p.background or item.canvas_background or 0x000000
+    local vector_top = view.renderer:render_canvas_text(canvas, text_x, top, text_width,
+      text_height, tostring(math.floor(maximum + 0.5)), style, background, true)
+    local bottom_y = math.max(top, bottom - text_height + 1)
+    local vector_bottom = view.renderer:render_canvas_text(canvas, text_x, bottom_y, text_width,
+      math.min(text_height, height - bottom_y), tostring(math.floor(minimum + 0.5)),
+      style, background, true)
+    if not vector_top then
+      draw_text(canvas, text_x, top, text_width, tostring(math.floor(maximum + 0.5)),
+        p.font_color, p.font_size, align, 255, view.renderer:font_for_size(p.font_size))
+    end
+    if not vector_bottom then
+      draw_text(canvas, text_x, bottom_y, text_width, tostring(math.floor(minimum + 0.5)),
+        p.font_color, p.font_size, align, 255, view.renderer:font_for_size(p.font_size))
+    end
   end
   if p.show_frame then
     draw_line(canvas, 0, 0, width - 1, 0, p.frame_color, 255, 1)
@@ -290,8 +333,12 @@ local function render_arc(view)
     clamp(item.percent or 0, 0, 100) * 3.6, item.active_color or 0x00FF00, thickness)
   if p.show_text then
     local size = p.font_size or 10
-    draw_text(canvas, 0, math.floor((height - size) / 2), width, item.display_text or "",
-      p.font_color or 0xFFFFFF, size, ALIGN_CENTER, 255, view.renderer:font_for_size(size))
+    if view.renderer.vector_font and view.renderer.vector_font.ready then
+      view.renderer:update_arc_text(view)
+    else
+      draw_text(canvas, 0, math.floor((height - size) / 2), width, item.display_text or "",
+        p.font_color or 0xFFFFFF, size, ALIGN_CENTER, 255, view.renderer:font_for_size(size))
+    end
   end
   canvas_end(canvas, explicit)
 end
@@ -556,55 +603,110 @@ function Renderer.new(opts)
   self.image_loaded = 0
   self.image_skipped = 0
   self.last_image_error = ""
-  self.font_choice = tostring(self.config.font or "auto")
-  self.font_handle = nil
-  self.fixed_font = nil
+  self.vector_font = opts.vector_font
+  self.font_choice = tostring(self.config.vector_font_family or "AIDA Noto Sans SC")
   self.font_error = ""
   self.active_page = 1
   return self
 end
 
 function Renderer:prepare_font()
-  self.font_handle = nil
-  self.fixed_font = nil
-  self.font_error = ""
-  local fixed_size = self.font_choice:match("^builtin:(%d+)$")
-  if fixed_size then
-    self.fixed_font = builtin_font(tonumber(fixed_size))
-    return
-  end
-  if self.font_choice == "auto" or self.font_choice == "" then return end
-  if self.font_choice:sub(1, 1) ~= "/" then
-    self.font_error = "unknown font selection"
-    return
-  end
-  if file and file.exists then
-    local checked, exists = pcall(file.exists, self.font_choice)
-    if not checked or not exists then
-      self.font_error = "font file missing: " .. self.font_choice
-      return
-    end
-  end
-  if not lv_font_load then
-    self.font_error = "font loader unavailable"
-    return
-  end
-  local loaded, handle_or_error = pcall(lv_font_load, self.font_choice)
-  if loaded and type(handle_or_error) == "number" and handle_or_error > 0 then
-    self.font_handle = handle_or_error
-    self.fixed_font = handle_or_error
-  else
-    self.font_error = "font load failed: " .. tostring(handle_or_error)
-  end
+  self.font_error = self.vector_font and self.vector_font.error or "vector font engine unavailable"
+  if self.vector_font and self.vector_font.ready then self.font_error = "" end
 end
 
 function Renderer:font_for_size(size)
-  return self.fixed_font or builtin_font(size)
+  return builtin_font(size)
+end
+
+function Renderer:render_canvas_text(canvas, x, y, width, height, text, text_style, background, opaque, full)
+  if not canvas or not self.vector_font or not self.vector_font.ready or not lv_canvas_blit_rgb565 then
+    return false
+  end
+  width, height = math.floor(width or 0), math.floor(height or 0)
+  if width < 1 or height < 1 then return false end
+  local data, render_error = self.vector_font:render(text, width, height, text_style,
+    background or self.layout.background or 0, CHROMA_KEY, opaque)
+  if not data then
+    self.font_error = tostring(render_error or "vector render failed")
+    return false
+  end
+  local ok, result = call(lv_canvas_blit_rgb565, canvas, math.floor(x or 0), math.floor(y or 0),
+    width, height, data, { byte_order = "little", full_rewrite = full == true })
+  if not ok or result == false then
+    ok, result = call(lv_canvas_blit_rgb565, canvas, math.floor(x or 0), math.floor(y or 0),
+      width, height, data)
+  end
+  if not ok or result == false then
+    self.font_error = "lv_canvas_blit_rgb565 failed"
+    return false
+  end
+  return true
+end
+
+function Renderer:update_text_view(text_view, text)
+  if not text_view then return false end
+  text_view.text = tostring(text or "")
+  if text_view.vector then
+    return self:render_canvas_text(text_view.object, 0, 0, text_view.width, text_view.height,
+      text_view.text, text_view.text_style, text_view.background, false, true)
+  end
+  if text_view.object then call(lv_label_set_text, text_view.object, text_view.text) return true end
+  return false
+end
+
+function Renderer:create_text_view(parent, geometry, text_style, width)
+  geometry, text_style = geometry or {}, text_style or {}
+  local x, y = tonumber(geometry.x) or 0, tonumber(geometry.y) or 0
+  local text_width = tonumber(width) or tonumber(geometry.w) or 0
+  if text_width <= 0 then text_width = 320 - x end
+  text_width = math.max(1, math.min(320 - x, math.floor(text_width)))
+  local available_height = math.max(1, 240 - y)
+  local text_height = tonumber(geometry.h) or 0
+  if text_height <= 0 then text_height = vector_text_height(text_style, available_height) end
+  text_height = math.max(1, math.min(available_height, math.floor(text_height)))
+
+  if self.vector_font and self.vector_font.ready and lv_canvas_blit_rgb565 then
+    local canvas = canvas_create(parent, text_width, text_height, TEXT_CANVAS_FMT)
+    if canvas then
+      call(lv_obj_set_pos, canvas, x, y)
+      call(lv_obj_set_style_bg_opa, canvas, 0, MAIN)
+      local text_view = {
+        object = canvas, vector = true, width = text_width, height = text_height,
+        text_style = text_style, background = self.layout.background or 0,
+      }
+      if self:update_text_view(text_view, text_style.text or "") then return text_view end
+      if lv_obj_del then call(lv_obj_del, canvas) end
+    end
+  end
+
+  local object = make_label(parent, geometry, text_style, text_width, self)
+  return { object = object, vector = false, text_style = text_style,
+    width = text_width, height = text_height }
+end
+
+function Renderer:update_arc_text(view)
+  if not view or not view.page then return false end
+  local item, params = view.item, view.item.params or {}
+  local style = parameter_text_style(params, "center")
+  local available = math.max(1, item.geometry.h)
+  local height = vector_text_height(style, available)
+  if not view.arc_text then
+    view.arc_text = self:create_text_view(view.page, {
+      x = item.geometry.x,
+      y = item.geometry.y + math.max(0, math.floor((item.geometry.h - height) / 2)),
+      w = item.geometry.w,
+      h = height,
+    }, style, item.geometry.w)
+    local background = params.fill and params.fill_color or item.canvas_background or self.layout.background or 0
+    view.arc_text.background = background
+  end
+  return self:update_text_view(view.arc_text, item.display_text or "")
 end
 
 function Renderer:make_text(page, item, geometry, text_style, width)
-  local object = make_label(page, geometry, text_style, width, self)
-  return { object = object, item = item, kind = "text" }
+  local text_view = self:create_text_view(page, geometry, text_style, width)
+  return { object = text_view.object, text = text_view, item = item, kind = "text" }
 end
 
 function Renderer:build_sensor(page, item)
@@ -612,24 +714,34 @@ function Renderer:build_sensor(page, item)
   local view = { item = item, kind = "sensor" }
   local width = g.w > 0 and g.w or math.max(1, 320 - g.x)
   if item.label then
-    local sg = item.label.style or {}
-    view.label = make_label(page, { x = g.x, y = g.y }, item.label.text_style, width, self)
+    view.label = self:create_text_view(page, { x = g.x, y = g.y }, item.label.text_style, width)
   end
   if item.value then
     local vg = item.value.style or {}
     local x = g.x + (tonumber((vg.left or ""):match("([%-]?%d+)")) or 0)
-    view.value = make_label(page, { x = x, y = g.y }, item.value.text_style, width - (x - g.x), self)
+    view.value = self:create_text_view(page, { x = x, y = g.y }, item.value.text_style, width - (x - g.x))
   end
   if item.unit then
     local ug = item.unit.style or {}
     local unit_style = item.unit.text_style
     unit_style.align = "right"
-    view.unit = make_label(page, { x = g.x, y = g.y }, unit_style, width, self)
+    view.unit = self:create_text_view(page, { x = g.x, y = g.y }, unit_style, width)
   end
   if item.bar then
     local bg = item.bar.geometry
     local bar_x = g.x + bg.x
-    local bar_y = g.y + bg.y + (item.bar.margin_top or 0)
+    local bar_y
+    if item.bar.style and item.bar.style.top == nil then
+      local line_size = 8
+      for _, text_item in ipairs({ item.label, item.value, item.unit }) do
+        line_size = math.max(line_size,
+          tonumber(text_item and text_item.text_style and text_item.text_style.font
+            and text_item.text_style.font.size) or 0)
+      end
+      bar_y = g.y + math.ceil(line_size * 1.2) + (item.bar.margin_top or 0)
+    else
+      bar_y = g.y + bg.y + (item.bar.margin_top or 0)
+    end
     local bar_w = bg.w > 0 and bg.w or width
     local bar_h = bg.h > 0 and bg.h or 4
     view.bar_bg = make_panel(page, bar_x, bar_y, bar_w, bar_h, item.bar.background[1], 255)
@@ -652,7 +764,7 @@ function Renderer:build_item(page, item)
     item.canvas_background = self.layout.background or 0
     local canvas = canvas_create(page, math.max(1, item.geometry.w), math.max(1, item.geometry.h))
     if canvas then call(lv_obj_set_pos, canvas, item.geometry.x, item.geometry.y) end
-    view = { object = canvas, item = item, kind = item.kind, renderer = self }
+    view = { object = canvas, item = item, kind = item.kind, renderer = self, page = page }
     if item.kind == "graph" then render_graph(view) else render_arc(view) end
   elseif item.kind == "image" then
     view = { item = item, kind = "image", object = nil }
@@ -781,7 +893,8 @@ function Renderer:apply_update(update)
   local view = self.views[update.id]
   if not view then return false end
   if update.kind == "text" then
-    if view.kind == "sensor" and view.value then call(lv_label_set_text, view.value, tostring(update.text or ""))
+    if view.kind == "sensor" and view.value then self:update_text_view(view.value, update.text or "")
+    elseif view.text then self:update_text_view(view.text, update.text or "")
     elseif view.object then call(lv_label_set_text, view.object, tostring(update.text or "")) end
   elseif update.kind == "bar" and view.bar_fg then
     local width = math.max(1, math.floor(view.bar_width * clamp(update.percent, 0, 100) / 100 + 0.5))
@@ -811,6 +924,7 @@ function Renderer:apply_sample(sample)
 end
 
 function Renderer:snapshot()
+  local font_stats = self.vector_font and self.vector_font:stats() or {}
   return {
     page = self.active_page,
     pages = #self.pages,
@@ -820,16 +934,22 @@ function Renderer:snapshot()
     images_skipped = self.image_skipped,
     image_error = self.last_image_error,
     font = self.font_choice,
-    font_loaded = self.font_error == "",
-    font_error = self.font_error,
+    font_engine = font_stats.engine or "firmware fallback",
+    font_loaded = font_stats.loaded == true and self.font_error == "",
+    font_error = self.font_error ~= "" and self.font_error or font_stats.error or "",
+    font_bytes = font_stats.font_bytes or 0,
+    font_cache_bytes = font_stats.cache_bytes or 0,
+    font_cache_entries = font_stats.cache_entries or 0,
+    font_renders = font_stats.renders or 0,
+    font_missing_glyphs = font_stats.missing_glyphs or 0,
+    internal_free = font_stats.internal_free or 0,
+    psram_free = font_stats.psram_free or 0,
+    psram_largest = font_stats.psram_largest or 0,
   }
 end
 
 function Renderer:destroy()
   call(lv_obj_clean, self.root)
-  if self.font_handle and lv_font_free then call(lv_font_free, self.font_handle) end
-  self.font_handle = nil
-  self.fixed_font = nil
   self.image_queue = {}
   self.image_busy = false
   self.pages = {}

@@ -85,24 +85,44 @@ local function parse_gradient(value, fallback)
   return colors
 end
 
-local function font_from_style(style)
-  local raw_size = css_number(style, "font-size", 10)
-  local value = tostring(style and style["font-size"] or "")
+local function font_size(value, fallback)
+  local text = tostring(value or "")
+  local raw_size = tonumber(text:match("([%-+]?%d+%.?%d*)")) or fallback or 10
   local pixels = raw_size
-  if value:find("pt", 1, true) then
+  if text:lower():find("pt", 1, true) then
     pixels = math.floor(raw_size * 4 / 3 + 0.5)
   end
-  if pixels < 8 then
-    pixels = 8
-  elseif pixels > 48 then
-    pixels = 48
-  end
+  if pixels < 6 then pixels = 6 elseif pixels > 96 then pixels = 96 end
+  return pixels, raw_size
+end
+
+local function font_from_style(style)
+  local pixels, raw_size = font_size(style and style["font-size"], 10)
+  local weight = tostring(style and style["font-weight"] or ""):lower()
+  local numeric_weight = tonumber(weight:match("(%d+)")) or 0
   return {
     size = pixels,
     source_size = raw_size,
     family = style and style["font-family"] or "",
-    bold = tostring(style and style["font-weight"] or ""):lower():find("bold", 1, true) ~= nil,
+    bold = weight:find("bold", 1, true) ~= nil or numeric_weight >= 600,
     italic = tostring(style and style["font-style"] or ""):lower():find("italic", 1, true) ~= nil,
+  }
+end
+
+local function shadow_from_style(style)
+  local raw = trim(style and style["text-shadow"] or "")
+  if raw == "" or raw:lower() == "none" then return nil end
+  local lengths = {}
+  for value in raw:gmatch("([%-+]?%d+%.?%d*)px") do
+    lengths[#lengths + 1] = tonumber(value) or 0
+    if #lengths == 3 then break end
+  end
+  return {
+    x = math.floor((lengths[1] or 0) + 0.5),
+    y = math.floor((lengths[2] or 0) + 0.5),
+    blur = math.max(0, math.floor((lengths[3] or 0) + 0.5)),
+    color = css_color(raw, 0x000000),
+    opacity = 192,
   }
 end
 
@@ -157,12 +177,16 @@ end
 
 local function text_fields(style, text)
   local font = font_from_style(style)
+  local decoration = tostring(style and style["text-decoration"] or ""):lower()
   return {
     text = html_decode(text),
     color = css_color(style and style.color, 0xFFFFFF),
     font = font,
     align = style and (style.float == "right" and "right" or style["text-align"]) or "left",
-    shadow = style and style["text-shadow"] or nil,
+    underline = decoration:find("underline", 1, true) ~= nil,
+    strike = decoration:find("line-through", 1, true) ~= nil
+      or decoration:find("strikethrough", 1, true) ~= nil,
+    shadow = shadow_from_style(style),
   }
 end
 
@@ -386,7 +410,7 @@ local function parse_graph_call(model, line)
     show_scale = tonumber(values[19]) == 1,
     font_family = values[20] or "",
     font_color = css_color(values[21], 0xFFFFFF),
-    font_size = tonumber(tostring(values[22] or ""):match("(%d+)")) or 8,
+    font_size = font_size(values[22], 8),
     font_style = values[23] or "normal",
     font_weight = values[25] or "normal",
     right_align = tonumber(values[26]) == 1,
@@ -418,7 +442,7 @@ local function parse_arc_call(model, line)
     show_text = tonumber(values[9]) == 1,
     font_family = values[11] or "",
     font_color = css_color(values[12], 0xFFFFFF),
-    font_size = tonumber(tostring(values[13] or ""):match("(%d+)")) or 10,
+    font_size = font_size(values[13], 10),
     font_style = values[14] or "normal",
     font_weight = values[16] or "normal",
   }

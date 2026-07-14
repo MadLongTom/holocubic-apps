@@ -5,9 +5,11 @@ config.host = "192.168.0.232"
 config.port = 9999
 config.layout_path = "/"
 config.path = "/sse"
--- auto follows AIDA64 sizes with built-in Montserrat. The WebUI can select a
--- fixed built-in size or any LVGL .bin font currently present on the SD card.
-config.font = "auto"
+-- A single OFL-licensed Chinese TrueType face is rasterized on device at the
+-- exact size requested by AIDA64. Keep the family name in sync with WebUI.
+config.vector_font_family = "AIDA Noto Sans SC"
+config.vector_font_module = "/sd/apps/aida_monitor/modules/aida_font.so"
+config.vector_font_path = "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"
 
 config.timeout_ms = 7000
 config.reconnect_ms = 2000

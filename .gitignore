@@ -17,3 +17,9 @@ info页面要求.md
 /xiaozhi/src/**/config/
 /xiaozhi/src/**/.pio/
 /xiaozhi/src/**/sdkconfig.old
+
+# AIDA vector font module build outputs
+/aida_monitor/src/build/
+/aida_monitor/src/managed_components/
+/aida_monitor/src/sdkconfig
+/aida_monitor/src/sdkconfig.old

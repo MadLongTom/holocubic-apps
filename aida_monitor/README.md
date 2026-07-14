@@ -14,6 +14,8 @@ The app first downloads the HTML layout from `/`, creates the corresponding 320�
 - Static PNG/JPEG/BMP images and animated GIF resources served by AIDA64
 - Multiple LCD pages and live `PageN` switching
 - Dynamic layout reload without reinstalling the app
+- On-device TrueType rendering from one bundled Chinese font at 6–96 px
+- Synthetic bold/italic plus underline, strikethrough, and CSS text shadow
 
 This target is the complete **RemoteSensor LCD** feature set. SensorPanel-only Custom Gauges are not emitted by the RemoteSensor web protocol; use AIDA64 Arc Gauge instead.
 
@@ -24,7 +26,9 @@ This target is the complete **RemoteSensor LCD** feature set. SensorPanel-only C
 3. Set the RemoteSensor port (this checkout defaults to `9999`).
 4. Set Preview Resolution to **320 × 240**.
 5. Use AIDA64's normal LCD Items editor to build the screen and pages.
-6. Click **Apply**.
+6. Install `AIDA Noto Sans SC` from the app WebUI and select it for every text
+   item so the Windows preview and HoloCubic use the same metrics.
+7. Click **Apply**.
 
 You should now be able to open both URLs from another LAN device:
 
@@ -43,8 +47,8 @@ Open the AIDA Monitor management page from HoloCubic WebUI. It exposes:
 - RemoteSensor port
 - Layout path (normally `/`)
 - SSE path (normally `/sse`)
-- Device font: automatic AIDA64-size mapping, a fixed built-in Montserrat size,
-  or any LVGL `.bin` font found under an installed app's `font` directory
+- Vector font engine status, glyph cache usage, and a download link for the
+  exact TTF that should be installed and selected in AIDA64
 - Runtime status, active page, page count, and parsed item count
 
 The defaults in this checkout are:
@@ -54,21 +58,27 @@ config.host = "192.168.0.232"
 config.port = 9999
 config.layout_path = "/"
 config.path = "/sse"
-config.font = "auto"
+config.vector_font_family = "AIDA Noto Sans SC"
+config.vector_font_module = "/sd/apps/aida_monitor/modules/aida_font.so"
+config.vector_font_path = "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"
 ```
 
 ## Rendering model
 
 RemoteSensor uses browser coordinates and does not put a canonical canvas size into the HTML response. The app therefore uses AIDA64's 320×240 preview coordinates **1:1 with no scaling**. Content outside the device viewport is clipped just like a 320×240 browser viewport.
 
-AIDA64 font size, color, alignment, style metadata, positions, gradients, histories, scales, grids, frames, and active page are parsed. Desktop font family names and bold/italic faces such as Tahoma/Arial are mapped to fonts available in the HoloCubic firmware, so glyph metrics and face styling can differ slightly from a desktop browser.
+AIDA64 font size, color, alignment, style metadata, positions, gradients,
+histories, scales, grids, frames, and active page are parsed. Font sizes in
+points are converted to CSS pixels (`pt × 4/3`) and rendered at the resulting
+integer size rather than snapped to a firmware bitmap size.
 
-The management page discovers the device's built-in Montserrat sizes and the
-`.bin` fonts currently installed on the SD card. `AUTO` preserves AIDA64's
-requested size by selecting the nearest built-in font. Selecting an SD font
-applies that fixed-size, fixed-character-set font to labels, sensor values,
-graph scales, and Arc Gauge text; specialized numeric fonts may not contain
-letters, units, CJK characters, or symbols.
+The bundled native `aida_font.so` module uses `stb_truetype` to rasterize one
+OFL-licensed, GB2312-subsetted Noto Sans SC TrueType face from SD into RGB565
+text canvases. A 512 KiB LRU glyph cache avoids rebuilding common digits and
+labels on each SSE update. The regular outline is also used to synthesize bold
+and italic variants; underline, strikethrough, and `text-shadow` are composited
+by the renderer. If the module or TTF cannot load, the app reports the reason
+in WebUI and keeps a firmware-font fallback visible.
 
 Remote images are stored under `/sd/apps/aida_monitor/cache`. A layout `ReLoad` rebuilds the UI and refreshes the resources so replacing an image under the same filename is reflected on the device.
 
@@ -82,12 +92,33 @@ Upload the package directory to `/sd/apps/aida_monitor` and rescan apps. Require
 main.lua
 aida_layout.lua
 aida_renderer.lua
+aida_vector_font.lua
 aida_client.lua
 config.lua
 web.lua
 app.info
 main.png
 info.html
+font/aida_noto_sans_sc.ttf
+font/OFL.txt
+modules/aida_font.so
+```
+
+## Rebuilding the vector assets
+
+Download `NotoSansSC[wght].ttf` from the Google Fonts `ofl/notosanssc`
+directory, install `fonttools`, then build the static GB2312 subset:
+
+```powershell
+python aida_monitor/tools/build_vector_font.py NotoSansSC-wght.ttf
+```
+
+Build the ESP32-S3 module with ESP-IDF 5.5.2 and copy `aida_font.so` into
+`package/modules`:
+
+```powershell
+cmake -S aida_monitor/src -B aida_monitor/src/build -G Ninja -DIDF_TARGET=esp32s3
+cmake --build aida_monitor/src/build --target so
 ```
 
 ## Tests

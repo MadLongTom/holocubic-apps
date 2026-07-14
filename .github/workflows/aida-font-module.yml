@@ -1,0 +1,37 @@
+name: AIDA vector font module
+
+on:
+  push:
+    paths:
+      - "aida_monitor/src/**"
+      - "mp3_player/src/main/module_abi.h"
+      - ".github/workflows/aida-font-module.yml"
+  pull_request:
+    paths:
+      - "aida_monitor/src/**"
+      - "mp3_player/src/main/module_abi.h"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure ESP32-S3 module
+        working-directory: aida_monitor/src
+        run: idf.py set-target esp32s3 && idf.py reconfigure
+      - name: Build shared object
+        working-directory: aida_monitor/src
+        run: cmake --build build --target so --parallel 2
+      - name: Stage module
+        run: |
+          mkdir -p artifact
+          find aida_monitor/src/build -name aida_font.so -exec cp {} artifact/aida_font.so \;
+          test -s artifact/aida_font.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aida-font-esp32s3
+          path: artifact/aida_font.so
+          if-no-files-found: error
+

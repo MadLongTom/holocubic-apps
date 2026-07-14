@@ -12,6 +12,7 @@ local config = dofile(APP_DIR .. "/config.lua")
 local Layout = dofile(APP_DIR .. "/aida_layout.lua")
 local Renderer = dofile(APP_DIR .. "/aida_renderer.lua")
 local AidaClient = dofile(APP_DIR .. "/aida_client.lua")
+local VectorFont = dofile(APP_DIR .. "/aida_vector_font.lua")
 local AidaWeb = nil
 if file and file.exists and file.exists(APP_DIR .. "/web.lua") then
   local ok, module = pcall(dofile, APP_DIR .. "/web.lua")
@@ -34,6 +35,7 @@ local state = {
   detail = "",
   last_event_ms = 0,
   layout = nil,
+  vector_font = VectorFont.new(config),
 }
 
 local function log(...)
@@ -176,6 +178,7 @@ fetch_layout = function(reason)
       root = lv_scr_act(),
       resource_url = function(src) return Layout.resource_url(config, src) end,
       log = log,
+      vector_font = state.vector_font,
     })
     local built, build_err = pcall(function() renderer:build() end)
     if not built then
@@ -205,9 +208,18 @@ function state.snapshot()
     images_loaded = render.images_loaded or 0,
     images_skipped = render.images_skipped or 0,
     image_error = render.image_error or "",
-    font = render.font or tostring(config.font or "auto"),
+    font = render.font or tostring(config.vector_font_family or "AIDA Noto Sans SC"),
+    font_engine = render.font_engine or "firmware fallback",
     font_loaded = render.font_loaded ~= false,
     font_error = render.font_error or "",
+    font_bytes = render.font_bytes or 0,
+    font_cache_bytes = render.font_cache_bytes or 0,
+    font_cache_entries = render.font_cache_entries or 0,
+    font_renders = render.font_renders or 0,
+    font_missing_glyphs = render.font_missing_glyphs or 0,
+    internal_free = render.internal_free or 0,
+    psram_free = render.psram_free or 0,
+    psram_largest = render.psram_largest or 0,
   }
 end
 

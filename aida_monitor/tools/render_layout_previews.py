@@ -38,6 +38,13 @@ def integer(value: object, fallback: int = 0) -> int:
     return round(number(value, fallback))
 
 
+def font_pixels(value: object, fallback: int = 10) -> int:
+    pixels = number(value, fallback)
+    if "pt" in str(value or "").lower():
+        pixels *= 4 / 3
+    return max(6, min(96, round(pixels)))
+
+
 def color(value: object, fallback: str = "#000000") -> str:
     match = re.search(r"#([0-9a-fA-F]{6})", str(value or ""))
     return f"#{match.group(1).upper()}" if match else fallback
@@ -68,16 +75,23 @@ def gradients(raw: object, fallback: str) -> tuple[str, str]:
 
 
 def text_style(style: dict[str, str], value: str) -> dict[str, Any]:
-    raw_size = number(style.get("font-size"), 10)
-    size = round(raw_size * 4 / 3) if "pt" in style.get("font-size", "") else round(raw_size)
+    size = font_pixels(style.get("font-size"), 10)
     align = style.get("text-align", "right" if style.get("float") == "right" else "left")
     return {
         "text": html_module.unescape(value),
         "color": color(style.get("color"), "#FFFFFF"),
-        "size": max(8, min(48, size)),
+        "size": size,
         "family": style.get("font-family", "Arial"),
-        "bold": "bold" in style.get("font-weight", "").lower(),
+        "bold": "bold" in style.get("font-weight", "").lower()
+        or integer(style.get("font-weight"), 0) >= 600,
         "italic": "italic" in style.get("font-style", "").lower(),
+        "underline": "underline" in style.get("text-decoration", "").lower(),
+        "strike": "line-through" in style.get("text-decoration", "").lower(),
+        "shadow": {
+            "x": integer(re.findall(r"[-+]?\d+(?:\.\d+)?px", style.get("text-shadow", ""))[0], 0),
+            "y": integer(re.findall(r"[-+]?\d+(?:\.\d+)?px", style.get("text-shadow", ""))[1], 0),
+            "color": color(style.get("text-shadow"), "#000000"),
+        } if len(re.findall(r"[-+]?\d+(?:\.\d+)?px", style.get("text-shadow", ""))) >= 2 else None,
         "align": align,
     }
 
@@ -248,7 +262,8 @@ def parse_layout(document: str, source_base: str | None = None,
             "show_frame": int(values[13]) == 1, "frame": color(values[14], "#808080"),
             "show_grid": int(values[15]) == 1, "grid": color(values[16], "#404040"),
             "graph": color(values[17], "#FFFFFF"), "show_scale": int(values[18]) == 1,
-            "font_color": color(values[20], "#FFFFFF"), "font_size": integer(values[21], 8),
+            "font_color": color(values[20], "#FFFFFF"), "font_size": font_pixels(values[21], 8),
+            "font_style": str(values[22]), "font_weight": str(values[24]),
             "right_align": int(values[25]) == 1,
         }
         suffix = re.search(r"\d+", item.id).group(0)
@@ -266,7 +281,8 @@ def parse_layout(document: str, source_base: str | None = None,
             "thickness": int(values[1]), "start": float(values[2]),
             "fill": int(values[6]) == 1, "fill_color": color(values[7]),
             "show_text": int(values[8]) == 1, "font_color": color(values[11], "#FFFFFF"),
-            "font_size": integer(values[12], 10),
+            "font_size": font_pixels(values[12], 10),
+            "font_style": str(values[13]), "font_weight": str(values[15]),
         }
         item.data.update(percent=0, display_text="0", background_color="#202020", active_color="#00FF00")
 
@@ -331,15 +347,7 @@ def font(family: str, size: int, bold: bool = False, italic: bool = False) -> Im
     key = (family, size, bold, italic)
     if key in _FONTS:
         return _FONTS[key]
-    windows = Path("C:/Windows/Fonts")
-    family_lower = family.lower()
-    if "tahoma" in family_lower:
-        name = "tahomabd.ttf" if bold else "tahoma.ttf"
-    elif "consol" in family_lower or "mono" in family_lower:
-        name = "consolaz.ttf" if italic else "consolab.ttf" if bold else "consola.ttf"
-    else:
-        name = "arialbi.ttf" if bold and italic else "arialbd.ttf" if bold else "ariali.ttf" if italic else "arial.ttf"
-    path = windows / name
+    path = ROOT / "package" / "font" / "aida_noto_sans_sc.ttf"
     try:
         value = ImageFont.truetype(str(path), max(1, size))
     except OSError:
@@ -357,7 +365,20 @@ def draw_text(draw: ImageDraw.ImageDraw, xy: tuple[int, int], width: int, style:
         box = draw.textbbox((0, 0), value, font=fnt)
         text_width = box[2] - box[0]
         x += width - text_width if style["align"] == "right" else (width - text_width) // 2
-    draw.text((x, y - 1), value, font=fnt, fill=style.get("color", "#FFFFFF"))
+    stroke = max(1, int(style.get("size", 10)) // 16) if style.get("bold") else 0
+    shadow = style.get("shadow")
+    if shadow:
+        draw.text((x + shadow["x"], y - 1 + shadow["y"]), value, font=fnt,
+                  fill=shadow["color"], stroke_width=stroke, stroke_fill=shadow["color"])
+    draw.text((x, y - 1), value, font=fnt, fill=style.get("color", "#FFFFFF"),
+              stroke_width=stroke, stroke_fill=style.get("color", "#FFFFFF"))
+    box = draw.textbbox((x, y - 1), value, font=fnt, stroke_width=stroke)
+    thickness = max(1, int(style.get("size", 10)) // 14)
+    if style.get("underline"):
+        draw.rectangle((box[0], box[3] - thickness, box[2], box[3]), fill=style.get("color", "#FFFFFF"))
+    if style.get("strike"):
+        mid = (box[1] + box[3]) // 2
+        draw.rectangle((box[0], mid, box[2], mid + thickness - 1), fill=style.get("color", "#FFFFFF"))
 
 
 def vertical_gradient(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], colors: tuple[str, str]) -> None:
@@ -431,7 +452,10 @@ def render_graph(draw: ImageDraw.ImageDraw, item: Item, page_background: str) ->
         if len(points) > 1:
             draw.line(points, fill=p["graph"], width=max(1, p["thick"]), joint="curve")
     if p["show_scale"]:
-        style = {"family": "Arial", "size": p["font_size"], "color": p["font_color"], "align": "left" if p["right_align"] else "right"}
+        style = {"family": "AIDA Noto Sans SC", "size": p["font_size"],
+                 "color": p["font_color"], "align": "left" if p["right_align"] else "right",
+                 "bold": "bold" in p.get("font_weight", "").lower(),
+                 "italic": "italic" in p.get("font_style", "").lower()}
         tx = right + 2 if p["right_align"] else x
         draw_text(draw, (tx, top), scale_width - 2, style, str(round(high)))
         draw_text(draw, (tx, max(top, bottom - p["font_size"])), scale_width - 2, style, str(round(low)))
@@ -458,10 +482,11 @@ def render_arc(draw: ImageDraw.ImageDraw, item: Item, page_background: str) -> N
              fill=item.data.get("active_color", "#00FF00"), width=thickness)
     if p["show_text"]:
         value = str(item.data.get("display_text", ""))
-        fnt = font("Arial", p["font_size"])
-        bbox = draw.textbbox((0, 0), value, font=fnt)
-        draw.text((x + (w - (bbox[2] - bbox[0])) // 2, y + (h - (bbox[3] - bbox[1])) // 2 - bbox[1]),
-                  value, font=fnt, fill=p["font_color"])
+        style = {"family": "AIDA Noto Sans SC", "size": p["font_size"],
+                 "color": p["font_color"], "align": "center",
+                 "bold": "bold" in p.get("font_weight", "").lower(),
+                 "italic": "italic" in p.get("font_style", "").lower()}
+        draw_text(draw, (x, y + max(0, (h - p["font_size"]) // 2)), w, style, value)
 
 
 def load_resource(layout: Layout, src: str) -> Image.Image | None:
