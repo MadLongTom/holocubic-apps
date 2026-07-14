@@ -220,6 +220,9 @@ function state.snapshot()
     internal_free = render.internal_free or 0,
     psram_free = render.psram_free or 0,
     psram_largest = render.psram_largest or 0,
+    compositor = render.compositor or "legacy-canvas",
+    surface_bytes = render.surface_bytes or 0,
+    surface_flushes = render.surface_flushes or 0,
   }
 end
 

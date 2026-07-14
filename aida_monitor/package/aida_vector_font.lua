@@ -15,6 +15,25 @@ local function align_value(value)
   return 0
 end
 
+local function render_options(text_style, opaque)
+  text_style = text_style or {}
+  local font = text_style.font or {}
+  local shadow = text_style.shadow or {}
+  return {
+    bold = font.bold == true,
+    italic = font.italic == true,
+    underline = text_style.underline == true,
+    strike = text_style.strike == true,
+    align = align_value(text_style.align),
+    opaque = opaque == true,
+    shadow_dx = tonumber(shadow.x) or 0,
+    shadow_dy = tonumber(shadow.y) or 0,
+    shadow_blur = clamp(shadow.blur or 0, 0, 2),
+    shadow_color = tonumber(shadow.color) or 0,
+    shadow_opacity = shadow.color and clamp(shadow.opacity or 192, 0, 255) or 0,
+  }
+end
+
 function VectorFont.new(config)
   config = config or {}
   local self = setmetatable({
@@ -23,6 +42,8 @@ function VectorFont.new(config)
     font_path = tostring(config.vector_font_path or "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"),
     module = nil,
     ready = false,
+    surface_ready = false,
+    surfaces = {},
     error = "",
   }, VectorFont)
 
@@ -42,6 +63,15 @@ function VectorFont.new(config)
   end
   self.module = module_or_error
   self.ready = true
+  self.surface_ready = type(module_or_error.surface_create) == "function"
+    and type(module_or_error.surface_free) == "function"
+    and type(module_or_error.surface_clear) == "function"
+    and type(module_or_error.surface_rect) == "function"
+    and type(module_or_error.surface_circle) == "function"
+    and type(module_or_error.surface_line) == "function"
+    and type(module_or_error.surface_arc) == "function"
+    and type(module_or_error.surface_text) == "function"
+    and type(module_or_error.surface_pixels) == "function"
   return self
 end
 
@@ -49,20 +79,7 @@ function VectorFont:render(text, width, height, text_style, background, chroma, 
   if not self.ready or not self.module then return nil, self.error end
   text_style = text_style or {}
   local font = text_style.font or {}
-  local shadow = text_style.shadow or {}
-  local options = {
-    bold = font.bold == true,
-    italic = font.italic == true,
-    underline = text_style.underline == true,
-    strike = text_style.strike == true,
-    align = align_value(text_style.align),
-    opaque = opaque == true,
-    shadow_dx = tonumber(shadow.x) or 0,
-    shadow_dy = tonumber(shadow.y) or 0,
-    shadow_blur = clamp(shadow.blur or 0, 0, 2),
-    shadow_color = tonumber(shadow.color) or 0,
-    shadow_opacity = shadow.color and clamp(shadow.opacity or 192, 0, 255) or 0,
-  }
+  local options = render_options(text_style, opaque)
   local ok, data, render_error = pcall(self.module.render,
     tostring(text or ""), math.floor(width), math.floor(height),
     clamp(font.size or 12, 6, 96), tonumber(text_style.color) or 0xFFFFFF,
@@ -79,11 +96,98 @@ function VectorFont:render(text, width, height, text_style, background, chroma, 
   return data
 end
 
+function VectorFont:measure(text, text_style)
+  if not self.ready or not self.module or type(self.module.measure) ~= "function" then return nil end
+  text_style = text_style or {}
+  local font = text_style.font or {}
+  local ok, width = pcall(self.module.measure, tostring(text or ""),
+    clamp(font.size or 12, 6, 96), render_options(text_style, false))
+  if not ok or type(width) ~= "number" then return nil end
+  return math.max(0, math.floor(width + 0.5))
+end
+
+function VectorFont:surface_create(width, height, color)
+  if not self.surface_ready then return nil, "software surface API unavailable" end
+  local ok, id, err = pcall(self.module.surface_create,
+    math.floor(width), math.floor(height), tonumber(color) or 0)
+  if not ok or type(id) ~= "number" then return nil, tostring(err or id) end
+  self.surfaces[id] = { width = math.floor(width), height = math.floor(height) }
+  return id
+end
+
+function VectorFont:surface_free(id)
+  if not id or not self.module then return true end
+  local ok, result = pcall(self.module.surface_free, id)
+  self.surfaces[id] = nil
+  return ok and result ~= false
+end
+
+function VectorFont:surface_clear(id, color)
+  local ok, result, err = pcall(self.module.surface_clear, id, tonumber(color) or 0)
+  if not ok or result == false or result == nil then return false, tostring(err or result) end
+  return true
+end
+
+function VectorFont:surface_rect(id, x, y, width, height, color, opacity)
+  local ok, result, err = pcall(self.module.surface_rect, id, math.floor(x), math.floor(y),
+    math.floor(width), math.floor(height), tonumber(color) or 0, clamp(opacity or 255, 0, 255))
+  if not ok or result == false or result == nil then return false, tostring(err or result) end
+  return true
+end
+
+function VectorFont:surface_circle(id, cx, cy, radius, color, opacity)
+  local ok, result, err = pcall(self.module.surface_circle, id,
+    math.floor(cx + 0.5), math.floor(cy + 0.5), math.max(0, math.floor(radius + 0.5)),
+    tonumber(color) or 0, clamp(opacity or 255, 0, 255))
+  if not ok or result == false or result == nil then return false, tostring(err or result) end
+  return true
+end
+
+function VectorFont:surface_line(id, x1, y1, x2, y2, color, opacity, width)
+  local ok, result, err = pcall(self.module.surface_line, id,
+    math.floor(x1 + 0.5), math.floor(y1 + 0.5),
+    math.floor(x2 + 0.5), math.floor(y2 + 0.5),
+    tonumber(color) or 0, clamp(opacity or 255, 0, 255), math.max(1, math.floor(width or 1)))
+  if not ok or result == false or result == nil then return false, tostring(err or result) end
+  return true
+end
+
+function VectorFont:surface_arc(id, cx, cy, radius, start_angle, end_angle, color, opacity, width)
+  local ok, result, err = pcall(self.module.surface_arc, id,
+    math.floor(cx + 0.5), math.floor(cy + 0.5), math.max(1, math.floor(radius + 0.5)),
+    tonumber(start_angle) or 0, tonumber(end_angle) or 0,
+    tonumber(color) or 0, clamp(opacity or 255, 0, 255), math.max(1, math.floor(width or 1)))
+  if not ok or result == false or result == nil then return false, tostring(err or result) end
+  return true
+end
+
+function VectorFont:surface_text(id, x, y, width, height, text, text_style)
+  text_style = text_style or {}
+  local font = text_style.font or {}
+  local ok, result, err = pcall(self.module.surface_text, id,
+    math.floor(x), math.floor(y), math.max(1, math.floor(width)), math.max(1, math.floor(height)),
+    tostring(text or ""), clamp(font.size or 12, 6, 96),
+    tonumber(text_style.color) or 0xFFFFFF, render_options(text_style, false))
+  if not ok or result == false or result == nil then return false, tostring(err or result) end
+  return true
+end
+
+function VectorFont:surface_pixels(id)
+  local meta = self.surfaces[id]
+  if not meta then return nil, "surface metadata missing" end
+  local ok, data, err = pcall(self.module.surface_pixels, id)
+  if not ok or type(data) ~= "string" then return nil, tostring(err or data) end
+  local expected = meta.width * meta.height * 2
+  if #data ~= expected then return nil, "surface buffer mismatch: " .. tostring(#data) .. "/" .. tostring(expected) end
+  return data
+end
+
 function VectorFont:stats()
   local base = {
     family = self.family,
     engine = self.ready and "stb_truetype" or "firmware fallback",
     loaded = self.ready,
+    surface_ready = self.surface_ready,
     error = self.error,
   }
   if self.ready and self.module and type(self.module.stats) == "function" then

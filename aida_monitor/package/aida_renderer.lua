@@ -9,7 +9,6 @@ local FLAG_SCROLLABLE = rawget(_G, "LV_OBJ_FLAG_SCROLLABLE")
 local FLAG_HIDDEN = rawget(_G, "LV_OBJ_FLAG_HIDDEN")
 local GRAD_VER = rawget(_G, "LV_GRAD_DIR_VER") or 1
 local CANVAS_FMT = rawget(_G, "LV_IMG_CF_TRUE_COLOR") or rawget(_G, "CANVAS_FMT_TRUE_COLOR")
-local TEXT_CANVAS_FMT = rawget(_G, "LV_IMG_CF_TRUE_COLOR_CHROMA_KEYED") or CANVAS_FMT
 local CHROMA_KEY = rawget(_G, "LV_COLOR_CHROMA_KEY") or 0x00FF00
 local BUILTIN_FONT_SIZES = { 8, 10, 12, 14, 16, 20, 24, 28 }
 
@@ -23,6 +22,23 @@ local function clamp(value, low, high)
   if value < low then return low end
   if value > high then return high end
   return value
+end
+
+local function style_number(style, key, fallback)
+  local value = style and style[key]
+  if type(value) == "number" then return value end
+  local parsed = tonumber(tostring(value or ""):match("([%-]?[%d%.]+)"))
+  if parsed == nil then return fallback end
+  return parsed
+end
+
+local function mix_color(first, second, ratio)
+  ratio = clamp(ratio or 0, 0, 1)
+  local inverse = 1 - ratio
+  local r = math.floor((((first >> 16) & 0xFF) * inverse + ((second >> 16) & 0xFF) * ratio) + 0.5)
+  local g = math.floor((((first >> 8) & 0xFF) * inverse + ((second >> 8) & 0xFF) * ratio) + 0.5)
+  local b = math.floor(((first & 0xFF) * inverse + (second & 0xFF) * ratio) + 0.5)
+  return (r << 16) | (g << 8) | b
 end
 
 local function builtin_font(size)
@@ -619,6 +635,251 @@ function Renderer:font_for_size(size)
   return builtin_font(size)
 end
 
+function Renderer:surface_text(x, y, width, height, text, text_style)
+  if not self.software_surface then return false end
+  local ok, err = self.vector_font:surface_text(self.software_surface,
+    x, y, width, height, text, text_style)
+  if not ok then self.font_error = tostring(err or "surface text failed") end
+  return ok
+end
+
+function Renderer:surface_gradient(x, y, width, height, colors, opacity)
+  colors = colors or { 0 }
+  local first = tonumber(colors[1]) or 0
+  local second = tonumber(colors[2]) or first
+  height = math.max(1, math.floor(height or 1))
+  if first == second or height == 1 then
+    return self.vector_font:surface_rect(self.software_surface, x, y, width, height,
+      first, opacity or 255)
+  end
+  local ok = true
+  for row = 0, height - 1 do
+    local color = mix_color(first, second, row / math.max(1, height - 1))
+    local row_ok, err = self.vector_font:surface_rect(self.software_surface,
+      x, y + row, width, 1, color, opacity or 255)
+    if not row_ok then self.font_error = tostring(err or "surface gradient failed") ok = false break end
+  end
+  return ok
+end
+
+function Renderer:software_draw_text_item(item)
+  local g = item.geometry or {}
+  local style = item.text_style or {}
+  local width = tonumber(g.w) or 0
+  if width <= 0 then width = math.max(1, 320 - (tonumber(g.x) or 0)) end
+  local height = tonumber(g.h) or 0
+  if height <= 0 then height = vector_text_height(style, 240 - (tonumber(g.y) or 0)) end
+  return self:surface_text(g.x or 0, g.y or 0, width, height,
+    style.text or "", style)
+end
+
+function Renderer:software_draw_sensor(item)
+  local g = item.geometry or {}
+  local base_x, base_y = tonumber(g.x) or 0, tonumber(g.y) or 0
+  local width = tonumber(g.w) or 0
+  if width <= 0 then width = math.max(1, 320 - base_x) end
+
+  local function draw_entry(entry, fallback_x)
+    if not entry then return true end
+    local css = entry.style or {}
+    local style = entry.text_style or {}
+    local measured = self.vector_font:measure(style.text or "", style)
+      or math.max(1, math.floor((style.font and style.font.size or 12) * #(style.text or "") * 0.6))
+    local box_width = style_number(css, "width", measured + 3)
+    box_width = math.max(1, math.min(width, math.floor(box_width + 0.5)))
+    local local_x
+    local right = style_number(css, "right", nil)
+    local left = style_number(css, "left", nil)
+    if right ~= nil then local_x = width - right - box_width
+    elseif left ~= nil then local_x = left
+    else local_x = fallback_x or 0 end
+    local height = vector_text_height(style, 240 - base_y)
+    return self:surface_text(base_x + local_x, base_y, box_width, height,
+      style.text or "", style)
+  end
+
+  draw_entry(item.label, 0)
+  draw_entry(item.value, 0)
+  draw_entry(item.unit, 0)
+
+  if item.bar then
+    local bar = item.bar
+    local bg = bar.geometry or {}
+    local bar_x = base_x + (tonumber(bg.x) or 0)
+    local bar_y
+    if bar.style and bar.style.top == nil then
+      local line_size = 8
+      for _, text_item in ipairs({ item.label, item.value, item.unit }) do
+        line_size = math.max(line_size,
+          tonumber(text_item and text_item.text_style and text_item.text_style.font
+            and text_item.text_style.font.size) or 0)
+      end
+      bar_y = base_y + math.ceil(line_size * 1.2) + (bar.margin_top or 0)
+    else
+      bar_y = base_y + (tonumber(bg.y) or 0) + (bar.margin_top or 0)
+    end
+    local bar_w = tonumber(bg.w) or 0
+    if bar_w <= 0 then bar_w = width end
+    local bar_h = tonumber(bg.h) or 0
+    if bar_h <= 0 then bar_h = 4 end
+    self:surface_gradient(bar_x, bar_y, bar_w, bar_h, bar.background, 255)
+    local foreground_w = math.max(0, math.floor(bar_w * clamp(bar.percent or 0, 0, 100) / 100 + 0.5))
+    if foreground_w > 0 then
+      self:surface_gradient(bar_x, bar_y, foreground_w, bar_h, bar.foreground, 255)
+    end
+  end
+end
+
+function Renderer:software_draw_graph(item)
+  local g, p = item.geometry or {}, item.params or {}
+  local ox, oy = tonumber(g.x) or 0, tonumber(g.y) or 0
+  local width, height = math.max(1, tonumber(g.w) or 1), math.max(1, tonumber(g.h) or 1)
+  if p.show_background then
+    self.vector_font:surface_rect(self.software_surface, ox, oy, width, height,
+      p.background or self.layout.background or 0, 255)
+  end
+  local left, top, right, bottom = 0, 0, width - 1, height - 1
+  if p.show_frame then left, top, right, bottom = 1, 1, width - 2, height - 2 end
+  local scale_width = p.show_scale and math.min(28, math.max(18, (p.font_size or 8) * 3)) or 0
+  if p.show_scale then
+    if p.right_align then right = right - scale_width else left = left + scale_width end
+  end
+  local plot_h = math.max(1, bottom - top)
+  local minimum, maximum = graph_range(item)
+  if p.show_grid then
+    local density = math.max(2, tonumber(p.grid_density) or 10)
+    local gx = left + ((tonumber(item.grid_offset) or 0) % density)
+    while gx <= right do
+      self.vector_font:surface_line(self.software_surface, ox + gx, oy + top,
+        ox + gx, oy + bottom, p.grid_color or 0x333333, 255, 1)
+      gx = gx + density
+    end
+    local gy = top
+    while gy <= bottom do
+      self.vector_font:surface_line(self.software_surface, ox + left, oy + gy,
+        ox + right, oy + gy, p.grid_color or 0x333333, 255, 1)
+      gy = gy + density
+    end
+  end
+  local history = item.history or {}
+  local count = #history
+  local step = math.max(1, tonumber(p.step) or 1)
+  local function point(index)
+    local px = right - (count - index) * step
+    local ratio = clamp((history[index] - minimum) / (maximum - minimum), 0, 1)
+    return px, bottom - ratio * plot_h
+  end
+  if p.graph_type == "HG" then
+    for index = 1, count do
+      local px, py = point(index)
+      if px >= left then
+        self.vector_font:surface_rect(self.software_surface, ox + math.floor(px), oy + math.floor(py),
+          math.max(1, step - 1), math.max(1, math.floor(bottom - py + 1)),
+          p.graph_color or 0xFFFFFF, 255)
+      end
+    end
+  else
+    for index = 2, count do
+      local x1, y1 = point(index - 1)
+      local x2, y2 = point(index)
+      if x2 >= left then
+        if p.graph_type == "AG" then
+          local start_x = math.floor(math.max(left, x1))
+          local end_x = math.floor(math.max(left, x2))
+          local span = math.max(1, x2 - x1)
+          for px = start_x, end_x do
+            local ratio = clamp((px - x1) / span, 0, 1)
+            local py = y1 + (y2 - y1) * ratio
+            self.vector_font:surface_line(self.software_surface, ox + px, oy + py,
+              ox + px, oy + bottom, p.graph_color or 0xFFFFFF, 84, 1)
+          end
+        end
+        self.vector_font:surface_line(self.software_surface, ox + math.max(left, x1), oy + y1,
+          ox + x2, oy + y2, p.graph_color or 0xFFFFFF, 255, p.thick or 1)
+      end
+    end
+  end
+  if p.show_scale then
+    local text_x = p.right_align and (right + 2) or 0
+    local style = parameter_text_style(p, p.right_align and "left" or "right")
+    local text_width = math.max(1, scale_width - 2)
+    local text_height = math.min(height, vector_text_height(style, height))
+    self:surface_text(ox + text_x, oy + top, text_width, text_height,
+      tostring(math.floor(maximum + 0.5)), style)
+    local bottom_y = math.max(top, bottom - text_height + 1)
+    self:surface_text(ox + text_x, oy + bottom_y, text_width,
+      math.min(text_height, height - bottom_y), tostring(math.floor(minimum + 0.5)), style)
+  end
+  if p.show_frame then
+    local color = p.frame_color or 0x666666
+    self.vector_font:surface_line(self.software_surface, ox, oy, ox + width - 1, oy, color, 255, 1)
+    self.vector_font:surface_line(self.software_surface, ox + width - 1, oy,
+      ox + width - 1, oy + height - 1, color, 255, 1)
+    self.vector_font:surface_line(self.software_surface, ox + width - 1, oy + height - 1,
+      ox, oy + height - 1, color, 255, 1)
+    self.vector_font:surface_line(self.software_surface, ox, oy + height - 1, ox, oy, color, 255, 1)
+  end
+end
+
+function Renderer:software_draw_arc(item)
+  local g, p = item.geometry or {}, item.params or {}
+  local ox, oy = tonumber(g.x) or 0, tonumber(g.y) or 0
+  local width, height = math.max(1, tonumber(g.w) or 1), math.max(1, tonumber(g.h) or 1)
+  local radius = math.max(1, math.floor(math.min(width, height) / 2) - 1)
+  local thickness = clamp(p.thickness or 4, 1, radius)
+  local cx, cy = ox + math.floor(width / 2), oy + math.floor(height / 2)
+  if p.fill and radius > thickness then
+    local inner_radius = math.max(1, radius - thickness)
+    self.vector_font:surface_circle(self.software_surface, cx, cy, inner_radius,
+      p.fill_color or self.layout.background or 0, 255)
+  end
+  self.vector_font:surface_arc(self.software_surface, cx, cy,
+    radius - math.floor(thickness / 2), 0, 359.5,
+    item.background_color or 0x202020, 255, thickness)
+  local span = clamp(item.percent or 0, 0, 100) * 3.6
+  if span > 0 then
+    self.vector_font:surface_arc(self.software_surface, cx, cy,
+      radius - math.floor(thickness / 2), p.start_angle or 0, (p.start_angle or 0) + span,
+      item.active_color or 0x00FF00, 255, thickness)
+  end
+  if p.show_text then
+    local style = parameter_text_style(p, "center")
+    local text_height = vector_text_height(style, height)
+    self:surface_text(ox, oy + math.max(0, math.floor((height - text_height) / 2)),
+      width, text_height, item.display_text or "", style)
+  end
+end
+
+function Renderer:software_flush(page_index)
+  local canvas = self.page_canvases and self.page_canvases[page_index]
+  if not canvas then return false end
+  local data, err = self.vector_font:surface_pixels(self.software_surface)
+  if not data then self.font_error = tostring(err or "surface export failed") return false end
+  local explicit = canvas_begin(canvas)
+  local ok, result = call(lv_canvas_blit_rgb565, canvas, 0, 0, 320, 240,
+    data, { byte_order = "little", full_rewrite = true })
+  if not ok or result == false then
+    ok, result = call(lv_canvas_blit_rgb565, canvas, 0, 0, 320, 240, data)
+  end
+  canvas_end(canvas, explicit)
+  if not ok or result == false then self.font_error = "software surface blit failed" return false end
+  return true
+end
+
+function Renderer:software_render_page(page_index)
+  local page = self.layout.pages[page_index]
+  if not page or not self.software_surface then return false end
+  local ok, err = self.vector_font:surface_clear(self.software_surface, self.layout.background or 0)
+  if not ok then self.font_error = tostring(err or "surface clear failed") return false end
+  for _, item in ipairs(page.items or {}) do
+    if item.kind == "label" or item.kind == "simple" then self:software_draw_text_item(item)
+    elseif item.kind == "sensor" then self:software_draw_sensor(item)
+    elseif item.kind == "graph" then self:software_draw_graph(item)
+    elseif item.kind == "arc" then self:software_draw_arc(item) end
+  end
+  return self:software_flush(page_index)
+end
+
 function Renderer:render_canvas_text(canvas, x, y, width, height, text, text_style, background, opaque, full)
   if not canvas or not self.vector_font or not self.vector_font.ready or not lv_canvas_blit_rgb565 then
     return false
@@ -653,7 +914,7 @@ function Renderer:update_text_view(text_view, text)
     local explicit = canvas_begin(text_view.object)
     local rendered = self:render_canvas_text(text_view.object, 0, 0,
       text_view.width, text_view.height, text_view.text,
-      text_view.text_style, text_view.background, false, true)
+      text_view.text_style, text_view.background, true, true)
     canvas_end(text_view.object, explicit)
     return rendered
   end
@@ -673,7 +934,9 @@ function Renderer:create_text_view(parent, geometry, text_style, width)
   text_height = math.max(1, math.min(available_height, math.floor(text_height)))
 
   if self.vector_font and self.vector_font.ready and lv_canvas_blit_rgb565 then
-    local canvas = canvas_create(parent, text_width, text_height, TEXT_CANVAS_FMT)
+    -- Use the same TRUE_COLOR path as graphs. The firmware exposes the
+    -- chroma-keyed format but not its key and drops standalone keyed canvases.
+    local canvas = canvas_create(parent, text_width, text_height, CANVAS_FMT)
     if canvas then
       call(lv_obj_set_pos, canvas, x, y)
       call(lv_obj_set_style_bg_opa, canvas, 0, MAIN)
@@ -784,12 +1047,62 @@ function Renderer:build_item(page, item)
   end
 end
 
+function Renderer:index_software_item(page, page_index, item)
+  local view = { item = item, kind = item.kind, page = page, page_index = page_index }
+  if item.kind == "image" then
+    self.image_queue[#self.image_queue + 1] = { page = page, item = item, view = view }
+  end
+  self.views[item.id] = view
+  if item.value_update then self.views[item.value_update] = view end
+  if item.bar and item.bar.update_id then self.views[item.bar.update_id] = view end
+  if item.update_id then self.views[item.update_id] = view end
+  return view
+end
+
 function Renderer:build()
   self:prepare_font()
   call(lv_obj_clean, self.root)
   call(lv_obj_set_style_bg_color, self.root, self.layout.background or 0, MAIN)
   call(lv_obj_set_style_bg_opa, self.root, 255, MAIN)
   if FLAG_SCROLLABLE then call(lv_obj_clear_flag, self.root, FLAG_SCROLLABLE) end
+  self.software_mode = self.vector_font and self.vector_font.surface_ready
+    and lv_canvas_blit_rgb565 and CANVAS_FMT and true or false
+  if self.software_mode then
+    local surface, surface_error = self.vector_font:surface_create(320, 240, self.layout.background or 0)
+    if not surface then
+      self.software_mode = false
+      self.font_error = tostring(surface_error or "software surface unavailable")
+    else
+      self.software_surface = surface
+      self.page_canvases = {}
+      for index = 1, self.layout.page_count do
+        local page = make_panel(self.root, 0, 0, 320, 240, self.layout.background or 0, 255)
+        self.pages[index] = page
+        set_hidden(page, index ~= self.active_page)
+        local canvas = canvas_create(page, 320, 240, CANVAS_FMT)
+        if canvas then call(lv_obj_set_pos, canvas, 0, 0) end
+        self.page_canvases[index] = canvas
+        for _, item in ipairs(self.layout.pages[index].items) do
+          self:index_software_item(page, index, item)
+        end
+        if not canvas or not self:software_render_page(index) then
+          self.software_mode = false
+          break
+        end
+      end
+      if self.software_mode then
+        self:load_next_image()
+        return
+      end
+      self.vector_font:surface_free(self.software_surface)
+      self.software_surface = nil
+      self.page_canvases = nil
+      self.pages = {}
+      self.views = {}
+      self.image_queue = {}
+      call(lv_obj_clean, self.root)
+    end
+  end
   for index = 1, self.layout.page_count do
     local page = make_panel(self.root, 0, 0, 320, 240, self.layout.background or 0, 255)
     self.pages[index] = page
@@ -895,9 +1208,36 @@ function Renderer:set_page(index)
   self.active_page = index
 end
 
-function Renderer:apply_update(update)
+function Renderer:apply_update(update, defer_render)
   local view = self.views[update.id]
   if not view then return false end
+  if self.software_mode then
+    local item = view.item
+    if update.kind == "text" then
+      if item.kind == "sensor" and item.value then
+        item.value.text_style.text = tostring(update.text or "")
+      elseif item.text_style then
+        item.text_style.text = tostring(update.text or "")
+      end
+    elseif update.kind == "bar" and item.bar then
+      item.bar.percent = tonumber(update.percent) or 0
+      if update.background then item.bar.background = update.background end
+      if update.foreground then item.bar.foreground = update.foreground end
+    elseif update.kind == "graph" then
+      local history = item.history
+      history[#history + 1] = tonumber(update.value) or 0
+      local max_points = item.max_points or self.config.history_points or 49
+      while #history > max_points do table.remove(history, 1) end
+      item.grid_offset = (tonumber(item.grid_offset) or 0) - (item.params and item.params.step or 1)
+    elseif update.kind == "arc" then
+      item.percent = tonumber(update.percent) or 0
+      item.display_text = update.text or ""
+      item.background_color = update.background_color
+      item.active_color = update.active_color
+    end
+    if not defer_render then self:software_render_page(view.page_index or self.active_page) end
+    return true
+  end
   if update.kind == "text" then
     if view.kind == "sensor" and view.value then self:update_text_view(view.value, update.text or "")
     elseif view.text then self:update_text_view(view.text, update.text or "")
@@ -926,7 +1266,11 @@ end
 
 function Renderer:apply_sample(sample)
   if sample.page then self:set_page(sample.page) end
-  for _, update in ipairs(sample.updates or {}) do self:apply_update(update) end
+  local changed = false
+  for _, update in ipairs(sample.updates or {}) do
+    if self:apply_update(update, self.software_mode) then changed = true end
+  end
+  if self.software_mode and changed then self:software_render_page(self.active_page) end
 end
 
 function Renderer:snapshot()
@@ -951,15 +1295,23 @@ function Renderer:snapshot()
     internal_free = font_stats.internal_free or 0,
     psram_free = font_stats.psram_free or 0,
     psram_largest = font_stats.psram_largest or 0,
+    compositor = self.software_mode and "rgb565-a8" or "legacy-canvas",
+    surface_bytes = font_stats.surface_bytes or 0,
+    surface_flushes = font_stats.surface_flushes or 0,
   }
 end
 
 function Renderer:destroy()
+  if self.software_surface and self.vector_font then
+    self.vector_font:surface_free(self.software_surface)
+    self.software_surface = nil
+  end
   call(lv_obj_clean, self.root)
   self.image_queue = {}
   self.image_busy = false
   self.pages = {}
   self.views = {}
+  self.page_canvases = nil
 end
 
 Renderer.image_info = image_info

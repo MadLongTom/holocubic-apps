@@ -17,13 +17,14 @@ static void font_stb_free(void *ptr, void *userdata);
 #include "stb_truetype.h"
 
 #define FONT_MODULE_EXPORT __attribute__((visibility("default"), used))
-#define FONT_VERSION "0.1.0"
+#define FONT_VERSION "0.2.0"
 #define FONT_CACHE_SLOTS 96u
 #define FONT_CACHE_LIMIT (512u * 1024u)
 #define FONT_MAX_FILE_BYTES (4u * 1024u * 1024u)
 #define FONT_MAX_TEXT_BYTES 1024u
 #define FONT_MAX_WIDTH 320
 #define FONT_MAX_HEIGHT 240
+#define FONT_SURFACE_SLOTS 2u
 
 typedef struct cached_glyph_t {
     uint32_t codepoint;
@@ -46,6 +47,14 @@ typedef struct premul_pixel_t {
     uint8_t a;
 } premul_pixel_t;
 
+typedef struct software_surface_t {
+    uint16_t *pixels;
+    size_t bytes;
+    uint16_t width;
+    uint16_t height;
+    uint8_t used;
+} software_surface_t;
+
 struct font_instance_t {
     module_host_api_v1 host;
     uint8_t *font_data;
@@ -55,7 +64,9 @@ struct font_instance_t {
     size_t cache_bytes;
     uint32_t stamp;
     uint32_t render_count;
+    uint32_t surface_flushes;
     uint32_t missing_glyphs;
+    software_surface_t surfaces[FONT_SURFACE_SLOTS];
     char font_path[MODULE_PATH_MAX];
     uint8_t loaded;
 };
@@ -225,12 +236,27 @@ static void cache_clear(font_instance_t *inst)
     inst->cache_bytes = 0;
 }
 
+static void surfaces_clear(font_instance_t *inst)
+{
+    size_t index = 0;
+    if (!inst) {
+        return;
+    }
+    for (index = 0; index < FONT_SURFACE_SLOTS; ++index) {
+        if (inst->surfaces[index].pixels) {
+            font_release(inst, inst->surfaces[index].pixels);
+        }
+        memset(&inst->surfaces[index], 0, sizeof(inst->surfaces[index]));
+    }
+}
+
 static void font_close_internal(font_instance_t *inst)
 {
     if (!inst) {
         return;
     }
     cache_clear(inst);
+    surfaces_clear(inst);
     if (inst->font_data) {
         font_release(inst, inst->font_data);
     }
@@ -576,6 +602,401 @@ static uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue)
                     | ((uint16_t)blue >> 3));
 }
 
+static software_surface_t *surface_get(font_instance_t *inst, int id)
+{
+    if (!inst || id < 1 || id > (int)FONT_SURFACE_SLOTS) {
+        return NULL;
+    }
+    if (!inst->surfaces[id - 1].used || !inst->surfaces[id - 1].pixels) {
+        return NULL;
+    }
+    return &inst->surfaces[id - 1];
+}
+
+static uint16_t surface_blend_rgb565(uint16_t background, uint32_t foreground, int opacity)
+{
+    uint32_t alpha = (uint32_t)(opacity < 0 ? 0 : (opacity > 255 ? 255 : opacity));
+    uint32_t inverse = 255u - alpha;
+    uint32_t br = ((background >> 11) & 0x1Fu) * 255u / 31u;
+    uint32_t bg = ((background >> 5) & 0x3Fu) * 255u / 63u;
+    uint32_t bb = (background & 0x1Fu) * 255u / 31u;
+    uint32_t fr = (foreground >> 16) & 0xFFu;
+    uint32_t fg = (foreground >> 8) & 0xFFu;
+    uint32_t fb = foreground & 0xFFu;
+    return rgb565((uint8_t)((fr * alpha + br * inverse + 127u) / 255u),
+                  (uint8_t)((fg * alpha + bg * inverse + 127u) / 255u),
+                  (uint8_t)((fb * alpha + bb * inverse + 127u) / 255u));
+}
+
+static void surface_pixel(software_surface_t *surface,
+                          int x,
+                          int y,
+                          uint32_t color,
+                          int opacity)
+{
+    uint16_t *pixel = NULL;
+    if (!surface || !surface->pixels || x < 0 || y < 0
+        || x >= surface->width || y >= surface->height || opacity <= 0) {
+        return;
+    }
+    pixel = &surface->pixels[(size_t)y * surface->width + (size_t)x];
+    if (opacity >= 255) {
+        *pixel = rgb565((uint8_t)(color >> 16), (uint8_t)(color >> 8), (uint8_t)color);
+    } else {
+        *pixel = surface_blend_rgb565(*pixel, color, opacity);
+    }
+}
+
+static void surface_brush(software_surface_t *surface,
+                          int x,
+                          int y,
+                          int width,
+                          uint32_t color,
+                          int opacity)
+{
+    int radius = width > 1 ? width / 2 : 0;
+    int py = 0;
+    int px = 0;
+    for (py = y - radius; py <= y + radius; ++py) {
+        for (px = x - radius; px <= x + radius; ++px) {
+            surface_pixel(surface, px, py, color, opacity);
+        }
+    }
+}
+
+static int l_surface_create(lua_State *L)
+{
+    font_instance_t *inst = instance_from_lua(L);
+    int width = 0;
+    int height = 0;
+    uint32_t color = 0;
+    size_t index = 0;
+    size_t count = 0;
+    software_surface_t *surface = NULL;
+    uint16_t value = 0;
+    if (!inst) return 0;
+    width = (int)inst->host.lua.checkinteger(L, 1);
+    height = (int)inst->host.lua.checkinteger(L, 2);
+    color = (uint32_t)inst->host.lua.checkinteger(L, 3);
+    if (width < 1 || width > FONT_MAX_WIDTH || height < 1 || height > FONT_MAX_HEIGHT) {
+        return push_error(L, &inst->host, "surface dimensions are invalid");
+    }
+    for (index = 0; index < FONT_SURFACE_SLOTS; ++index) {
+        if (!inst->surfaces[index].used) {
+            surface = &inst->surfaces[index];
+            break;
+        }
+    }
+    if (!surface) return push_error(L, &inst->host, "surface limit reached");
+    count = (size_t)width * (size_t)height;
+    surface->pixels = (uint16_t *)font_alloc(inst, count * sizeof(uint16_t));
+    if (!surface->pixels) return push_error(L, &inst->host, "not enough memory for surface");
+    surface->width = (uint16_t)width;
+    surface->height = (uint16_t)height;
+    surface->bytes = count * sizeof(uint16_t);
+    surface->used = 1;
+    value = rgb565((uint8_t)(color >> 16), (uint8_t)(color >> 8), (uint8_t)color);
+    for (count = 0; count < (size_t)width * (size_t)height; ++count) {
+        surface->pixels[count] = value;
+    }
+    inst->host.lua.pushinteger(L, (int64_t)(index + 1));
+    return 1;
+}
+
+static int l_surface_free(lua_State *L)
+{
+    font_instance_t *inst = instance_from_lua(L);
+    int id = 0;
+    software_surface_t *surface = NULL;
+    if (!inst) return 0;
+    id = (int)inst->host.lua.checkinteger(L, 1);
+    surface = surface_get(inst, id);
+    if (!surface) return push_error(L, &inst->host, "surface is invalid");
+    font_release(inst, surface->pixels);
+    memset(surface, 0, sizeof(*surface));
+    inst->host.lua.pushboolean(L, 1);
+    return 1;
+}
+
+static int l_surface_clear(lua_State *L)
+{
+    font_instance_t *inst = instance_from_lua(L);
+    software_surface_t *surface = NULL;
+    uint32_t color = 0;
+    uint16_t value = 0;
+    size_t index = 0;
+    if (!inst) return 0;
+    surface = surface_get(inst, (int)inst->host.lua.checkinteger(L, 1));
+    color = (uint32_t)inst->host.lua.checkinteger(L, 2);
+    if (!surface) return push_error(L, &inst->host, "surface is invalid");
+    value = rgb565((uint8_t)(color >> 16), (uint8_t)(color >> 8), (uint8_t)color);
+    for (index = 0; index < (size_t)surface->width * surface->height; ++index) {
+        surface->pixels[index] = value;
+    }
+    inst->host.lua.pushboolean(L, 1);
+    return 1;
+}
+
+static int l_surface_rect(lua_State *L)
+{
+    font_instance_t *inst = instance_from_lua(L);
+    software_surface_t *surface = NULL;
+    int x = 0, y = 0, width = 0, height = 0, opacity = 255;
+    uint32_t color = 0;
+    int row = 0, column = 0;
+    if (!inst) return 0;
+    surface = surface_get(inst, (int)inst->host.lua.checkinteger(L, 1));
+    x = (int)inst->host.lua.checkinteger(L, 2);
+    y = (int)inst->host.lua.checkinteger(L, 3);
+    width = (int)inst->host.lua.checkinteger(L, 4);
+    height = (int)inst->host.lua.checkinteger(L, 5);
+    color = (uint32_t)inst->host.lua.checkinteger(L, 6);
+    opacity = (int)inst->host.lua.checkinteger(L, 7);
+    if (!surface) return push_error(L, &inst->host, "surface is invalid");
+    for (row = 0; row < height; ++row) {
+        for (column = 0; column < width; ++column) {
+            surface_pixel(surface, x + column, y + row, color, opacity);
+        }
+    }
+    inst->host.lua.pushboolean(L, 1);
+    return 1;
+}
+
+static int l_surface_circle(lua_State *L)
+{
+    font_instance_t *inst = instance_from_lua(L);
+    software_surface_t *surface = NULL;
+    int cx = 0, cy = 0, radius = 0, opacity = 255;
+    uint32_t color = 0;
+    int row = 0, column = 0;
+    if (!inst) return 0;
+    surface = surface_get(inst, (int)inst->host.lua.checkinteger(L, 1));
+    cx = (int)inst->host.lua.checkinteger(L, 2);
+    cy = (int)inst->host.lua.checkinteger(L, 3);
+    radius = (int)inst->host.lua.checkinteger(L, 4);
+    color = (uint32_t)inst->host.lua.checkinteger(L, 5);
+    opacity = (int)inst->host.lua.checkinteger(L, 6);
+    if (!surface) return push_error(L, &inst->host, "surface is invalid");
+    if (radius < 0) radius = 0;
+    for (row = -radius; row <= radius; ++row) {
+        int half = (int)floorf(sqrtf((float)(radius * radius - row * row)) + 0.5f);
+        for (column = -half; column <= half; ++column) {
+            surface_pixel(surface, cx + column, cy + row, color, opacity);
+        }
+    }
+    inst->host.lua.pushboolean(L, 1);
+    return 1;
+}
+
+static int l_surface_line(lua_State *L)
+{
+    font_instance_t *inst = instance_from_lua(L);
+    software_surface_t *surface = NULL;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0, opacity = 255, width = 1;
+    int dx = 0, sx = 0, dy = 0, sy = 0, error = 0, twice = 0;
+    uint32_t color = 0;
+    if (!inst) return 0;
+    surface = surface_get(inst, (int)inst->host.lua.checkinteger(L, 1));
+    x0 = (int)inst->host.lua.checkinteger(L, 2);
+    y0 = (int)inst->host.lua.checkinteger(L, 3);
+    x1 = (int)inst->host.lua.checkinteger(L, 4);
+    y1 = (int)inst->host.lua.checkinteger(L, 5);
+    color = (uint32_t)inst->host.lua.checkinteger(L, 6);
+    opacity = (int)inst->host.lua.checkinteger(L, 7);
+    width = (int)inst->host.lua.checkinteger(L, 8);
+    if (!surface) return push_error(L, &inst->host, "surface is invalid");
+    if (width < 1) width = 1;
+    dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    sx = x0 < x1 ? 1 : -1;
+    dy = -(y1 > y0 ? y1 - y0 : y0 - y1);
+    sy = y0 < y1 ? 1 : -1;
+    error = dx + dy;
+    for (;;) {
+        surface_brush(surface, x0, y0, width, color, opacity);
+        if (x0 == x1 && y0 == y1) break;
+        twice = error * 2;
+        if (twice >= dy) { error += dy; x0 += sx; }
+        if (twice <= dx) { error += dx; y0 += sy; }
+    }
+    inst->host.lua.pushboolean(L, 1);
+    return 1;
+}
+
+static int l_surface_arc(lua_State *L)
+{
+    font_instance_t *inst = instance_from_lua(L);
+    software_surface_t *surface = NULL;
+    int cx = 0, cy = 0, radius = 0, opacity = 255, width = 1;
+    float start = 0.0f, finish = 0.0f, span = 0.0f;
+    int steps = 0, step = 0;
+    uint32_t color = 0;
+    if (!inst) return 0;
+    surface = surface_get(inst, (int)inst->host.lua.checkinteger(L, 1));
+    cx = (int)inst->host.lua.checkinteger(L, 2);
+    cy = (int)inst->host.lua.checkinteger(L, 3);
+    radius = (int)inst->host.lua.checkinteger(L, 4);
+    start = (float)inst->host.lua.checknumber(L, 5);
+    finish = (float)inst->host.lua.checknumber(L, 6);
+    color = (uint32_t)inst->host.lua.checkinteger(L, 7);
+    opacity = (int)inst->host.lua.checkinteger(L, 8);
+    width = (int)inst->host.lua.checkinteger(L, 9);
+    if (!surface) return push_error(L, &inst->host, "surface is invalid");
+    if (radius < 1) radius = 1;
+    if (width < 1) width = 1;
+    span = finish - start;
+    steps = (int)ceilf(fabsf(span) * (float)radius * 0.01745329252f);
+    if (steps < (int)ceilf(fabsf(span))) steps = (int)ceilf(fabsf(span));
+    if (steps < 1) steps = 1;
+    for (step = 0; step <= steps; ++step) {
+        float angle = (start + span * (float)step / (float)steps - 90.0f) * 0.01745329252f;
+        int x = cx + (int)floorf(cosf(angle) * radius + 0.5f);
+        int y = cy + (int)floorf(sinf(angle) * radius + 0.5f);
+        surface_brush(surface, x, y, width, color, opacity);
+    }
+    inst->host.lua.pushboolean(L, 1);
+    return 1;
+}
+
+static int l_surface_text(lua_State *L)
+{
+    font_instance_t *inst = instance_from_lua(L);
+    software_surface_t *destination = NULL;
+    const char *text = NULL;
+    size_t text_len = 0;
+    int x = 0, y = 0, width = 0, height = 0, size_px = 0;
+    uint32_t foreground = 0;
+    int bold = 0, italic = 0, underline = 0, strike = 0, align = 0;
+    int shadow_dx = 0, shadow_dy = 0, shadow_blur = 0, shadow_opacity = 0;
+    uint32_t shadow_color = 0;
+    int ascent = 0, descent = 0, line_gap = 0;
+    float scale = 1.0f;
+    int baseline = 0, measured = 0, origin_x = 0, bold_strength = 0;
+    premul_pixel_t *layer = NULL;
+    size_t pixel_count = 0, index = 0;
+    if (!inst || !inst->loaded) {
+        return push_error(L, inst ? &inst->host : s_host, "vector font is not loaded");
+    }
+    destination = surface_get(inst, (int)inst->host.lua.checkinteger(L, 1));
+    x = (int)inst->host.lua.checkinteger(L, 2);
+    y = (int)inst->host.lua.checkinteger(L, 3);
+    width = (int)inst->host.lua.checkinteger(L, 4);
+    height = (int)inst->host.lua.checkinteger(L, 5);
+    text = inst->host.lua.checklstring(L, 6, &text_len);
+    size_px = (int)inst->host.lua.checkinteger(L, 7);
+    foreground = (uint32_t)inst->host.lua.checkinteger(L, 8);
+    if (!destination) return push_error(L, &inst->host, "surface is invalid");
+    if (!text || text_len > FONT_MAX_TEXT_BYTES || width < 1 || height < 1
+        || width > FONT_MAX_WIDTH || height > FONT_MAX_HEIGHT) {
+        return push_error(L, &inst->host, "surface text arguments are invalid");
+    }
+    if (size_px < 6) size_px = 6;
+    if (size_px > 96) size_px = 96;
+    bold = option_boolean(L, &inst->host, 9, "bold", 0);
+    italic = option_boolean(L, &inst->host, 9, "italic", 0);
+    underline = option_boolean(L, &inst->host, 9, "underline", 0);
+    strike = option_boolean(L, &inst->host, 9, "strike", 0);
+    align = option_integer(L, &inst->host, 9, "align", 0);
+    shadow_dx = option_integer(L, &inst->host, 9, "shadow_dx", 0);
+    shadow_dy = option_integer(L, &inst->host, 9, "shadow_dy", 0);
+    shadow_blur = option_integer(L, &inst->host, 9, "shadow_blur", 0);
+    shadow_opacity = option_integer(L, &inst->host, 9, "shadow_opacity", 0);
+    shadow_color = (uint32_t)option_integer(L, &inst->host, 9, "shadow_color", 0);
+    if (shadow_blur < 0) shadow_blur = 0;
+    if (shadow_blur > 2) shadow_blur = 2;
+    if (shadow_opacity < 0) shadow_opacity = 0;
+    if (shadow_opacity > 255) shadow_opacity = 255;
+    pixel_count = (size_t)width * (size_t)height;
+    layer = (premul_pixel_t *)font_calloc(inst, pixel_count, sizeof(premul_pixel_t));
+    if (!layer) return push_error(L, &inst->host, "not enough memory for text layer");
+    scale = stbtt_ScaleForPixelHeight(&inst->font, (float)size_px);
+    stbtt_GetFontVMetrics(&inst->font, &ascent, &descent, &line_gap);
+    (void)descent; (void)line_gap;
+    baseline = (int)ceilf((float)ascent * scale);
+    measured = text_width(inst, text, text_len, size_px, bold, italic);
+    if (align == 1) origin_x = (width - measured) / 2;
+    else if (align == 2) origin_x = width - measured;
+    if (origin_x < 0) origin_x = 0;
+    bold_strength = bold ? (size_px + 15) / 16 : 0;
+    if (shadow_opacity > 0 && (shadow_dx || shadow_dy || shadow_blur)) {
+        draw_text_pass(inst, layer, width, height, text, text_len, size_px,
+                       origin_x, baseline, shadow_dx, shadow_dy, shadow_blur,
+                       bold_strength, italic, shadow_color, shadow_opacity);
+    }
+    draw_text_pass(inst, layer, width, height, text, text_len, size_px,
+                   origin_x, baseline, 0, 0, 0, bold_strength, italic,
+                   foreground, 255);
+    if (underline) {
+        int thickness = (size_px + 13) / 14;
+        draw_rect(layer, width, height, origin_x,
+                  baseline + ((size_px + 11) / 12), measured, thickness,
+                  foreground, 255);
+    }
+    if (strike) {
+        int thickness = (size_px + 13) / 14;
+        draw_rect(layer, width, height, origin_x,
+                  baseline - ((size_px * 5 + 8) / 16), measured, thickness,
+                  foreground, 255);
+    }
+    for (index = 0; index < pixel_count; ++index) {
+        premul_pixel_t *source = &layer[index];
+        int row = (int)(index / (size_t)width);
+        int column = (int)(index % (size_t)width);
+        int dx = x + column;
+        int dy = y + row;
+        uint16_t *target = NULL;
+        uint32_t inverse = 0, br = 0, bg = 0, bb = 0;
+        if (!source->a || dx < 0 || dy < 0
+            || dx >= destination->width || dy >= destination->height) continue;
+        target = &destination->pixels[(size_t)dy * destination->width + (size_t)dx];
+        inverse = 255u - source->a;
+        br = ((*target >> 11) & 0x1Fu) * 255u / 31u;
+        bg = ((*target >> 5) & 0x3Fu) * 255u / 63u;
+        bb = (*target & 0x1Fu) * 255u / 31u;
+        *target = rgb565((uint8_t)((uint32_t)source->r + (br * inverse + 127u) / 255u),
+                         (uint8_t)((uint32_t)source->g + (bg * inverse + 127u) / 255u),
+                         (uint8_t)((uint32_t)source->b + (bb * inverse + 127u) / 255u));
+    }
+    font_release(inst, layer);
+    inst->render_count++;
+    inst->host.lua.pushboolean(L, 1);
+    return 1;
+}
+
+static int l_surface_pixels(lua_State *L)
+{
+    font_instance_t *inst = instance_from_lua(L);
+    software_surface_t *surface = NULL;
+    if (!inst) return 0;
+    surface = surface_get(inst, (int)inst->host.lua.checkinteger(L, 1));
+    if (!surface) return push_error(L, &inst->host, "surface is invalid");
+    inst->host.lua.pushlstring(L, (const char *)surface->pixels, surface->bytes);
+    inst->surface_flushes++;
+    return 1;
+}
+
+static int l_font_measure(lua_State *L)
+{
+    font_instance_t *inst = instance_from_lua(L);
+    const char *text = NULL;
+    size_t text_len = 0;
+    int size_px = 0, bold = 0, italic = 0, measured = 0;
+    if (!inst || !inst->loaded) {
+        return push_error(L, inst ? &inst->host : s_host, "vector font is not loaded");
+    }
+    text = inst->host.lua.checklstring(L, 1, &text_len);
+    size_px = (int)inst->host.lua.checkinteger(L, 2);
+    if (!text || text_len > FONT_MAX_TEXT_BYTES) {
+        return push_error(L, &inst->host, "text is too long");
+    }
+    if (size_px < 6) size_px = 6;
+    if (size_px > 96) size_px = 96;
+    bold = option_boolean(L, &inst->host, 3, "bold", 0);
+    italic = option_boolean(L, &inst->host, 3, "italic", 0);
+    measured = text_width(inst, text, text_len, size_px, bold, italic);
+    inst->host.lua.pushinteger(L, measured);
+    return 1;
+}
+
 static int l_font_version(lua_State *L)
 {
     font_instance_t *inst = instance_from_lua(L);
@@ -808,6 +1229,8 @@ static int l_font_stats(lua_State *L)
 {
     font_instance_t *inst = instance_from_lua(L);
     size_t entries = 0;
+    size_t surface_bytes = 0;
+    size_t surface_count = 0;
     size_t index = 0;
     if (!inst) {
         return 0;
@@ -815,6 +1238,12 @@ static int l_font_stats(lua_State *L)
     for (index = 0; index < FONT_CACHE_SLOTS; ++index) {
         if (inst->cache[index].used) {
             ++entries;
+        }
+    }
+    for (index = 0; index < FONT_SURFACE_SLOTS; ++index) {
+        if (inst->surfaces[index].used) {
+            surface_count++;
+            surface_bytes += inst->surfaces[index].bytes;
         }
     }
     inst->host.lua.newtable(L);
@@ -832,6 +1261,12 @@ static int l_font_stats(lua_State *L)
     inst->host.lua.setfield(L, -2, "cache_entries");
     inst->host.lua.pushinteger(L, inst->render_count);
     inst->host.lua.setfield(L, -2, "renders");
+    inst->host.lua.pushinteger(L, (int64_t)surface_count);
+    inst->host.lua.setfield(L, -2, "surface_count");
+    inst->host.lua.pushinteger(L, (int64_t)surface_bytes);
+    inst->host.lua.setfield(L, -2, "surface_bytes");
+    inst->host.lua.pushinteger(L, inst->surface_flushes);
+    inst->host.lua.setfield(L, -2, "surface_flushes");
     inst->host.lua.pushinteger(L, inst->missing_glyphs);
     inst->host.lua.setfield(L, -2, "missing_glyphs");
     inst->host.lua.pushinteger(L, inst->host.heap.free_size(MODULE_HEAP_INTERNAL | MODULE_HEAP_8BIT));
@@ -895,6 +1330,16 @@ FONT_MODULE_EXPORT int32_t module_luaopen_v1(void *instance, lua_State *L)
     set_function_field(L, host, "version", l_font_version, inst);
     set_function_field(L, host, "open", l_font_open, inst);
     set_function_field(L, host, "render", l_font_render, inst);
+    set_function_field(L, host, "measure", l_font_measure, inst);
+    set_function_field(L, host, "surface_create", l_surface_create, inst);
+    set_function_field(L, host, "surface_free", l_surface_free, inst);
+    set_function_field(L, host, "surface_clear", l_surface_clear, inst);
+    set_function_field(L, host, "surface_rect", l_surface_rect, inst);
+    set_function_field(L, host, "surface_circle", l_surface_circle, inst);
+    set_function_field(L, host, "surface_line", l_surface_line, inst);
+    set_function_field(L, host, "surface_arc", l_surface_arc, inst);
+    set_function_field(L, host, "surface_text", l_surface_text, inst);
+    set_function_field(L, host, "surface_pixels", l_surface_pixels, inst);
     set_function_field(L, host, "stats", l_font_stats, inst);
     return MODULE_OK;
 }

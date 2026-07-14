@@ -58,6 +58,7 @@ assert(captured_vector_options.underline and captured_vector_options.strike, "ve
 assert(captured_vector_options.shadow_dx == 2 and captured_vector_options.shadow_blur == 1, "vector wrapper shadow")
 
 local next_object = 10
+local canvas_formats = {}
 local function object()
   next_object = next_object + 1
   return next_object
@@ -70,7 +71,10 @@ LV_COLOR_CHROMA_KEY = 0x00FF00
 lv_scr_act = function() return 1 end
 lv_obj_create = function() return object() end
 lv_label_create = function() return object() end
-lv_canvas_create = function() return object() end
+lv_canvas_create = function(_, _, _, format)
+  canvas_formats[#canvas_formats + 1] = format
+  return object()
+end
 lv_obj_clean = function() end
 lv_obj_set_pos = function() end
 lv_obj_set_size = function() end
@@ -109,16 +113,47 @@ lv_canvas_blit_rgb565 = function(_, _, _, width, height, data)
 end
 
 local vector_render_count = 0
+local vector_render_transparent_count = 0
+local software_texts = {}
+local software_clear_count = 0
+local software_flush_count = 0
 local vector_font = {
   ready = true,
+  surface_ready = true,
   error = "",
-  render = function(_, _, width, height)
+  render = function(_, _, width, height, _, _, _, opaque)
     vector_render_count = vector_render_count + 1
+    if not opaque then vector_render_transparent_count = vector_render_transparent_count + 1 end
     return string.rep("\0", width * height * 2)
+  end,
+  measure = function(_, text, style)
+    return math.max(1, math.floor(#tostring(text or "") * (style.font.size or 12) * 0.6))
+  end,
+  surface_create = function() return 1 end,
+  surface_free = function() return true end,
+  surface_clear = function()
+    software_clear_count = software_clear_count + 1
+    return true
+  end,
+  surface_rect = function() return true end,
+  surface_circle = function() return true end,
+  surface_line = function() return true end,
+  surface_arc = function() return true end,
+  surface_text = function(_, _, x, y, width, height, text)
+    vector_render_count = vector_render_count + 1
+    software_texts[#software_texts + 1] = {
+      x = x, y = y, width = width, height = height, text = tostring(text),
+    }
+    return true
+  end,
+  surface_pixels = function()
+    software_flush_count = software_flush_count + 1
+    return string.rep("\0", 320 * 240 * 2)
   end,
   stats = function()
     return { loaded = true, engine = "stb_truetype", font_bytes = 2432892,
-      cache_bytes = 4096, cache_entries = 8, renders = vector_render_count }
+      cache_bytes = 4096, cache_entries = 8, renders = vector_render_count,
+      surface_bytes = 320 * 240 * 2, surface_flushes = software_flush_count }
   end,
 }
 
@@ -136,8 +171,14 @@ local renderer = Renderer.new({ config = { history_points = 49,
   vector_font = vector_font })
 renderer:build()
 assert(vector_render_count > 0, "vector text rendered")
+assert(vector_render_transparent_count == 0, "renderer avoids unsupported keyed text canvases")
+for _, format in ipairs(canvas_formats) do
+  assert(format == LV_IMG_CF_TRUE_COLOR, "renderer uses the proven true-color canvas path")
+end
 assert(canvas_frame_begin_count > 0 and canvas_frame_end_count == canvas_frame_begin_count,
   "standalone vector canvases commit frames")
+assert(renderer:snapshot().compositor == "rgb565-a8", "software alpha compositor")
+assert(renderer:snapshot().surface_bytes == 320 * 240 * 2, "software surface size")
 renderer:apply_sample(sample)
 assert(renderer.active_page == 1, "renderer first page")
 assert(#renderer.views.Gph4.item.history == 1, "graph history")
@@ -146,6 +187,18 @@ assert(renderer.active_page == 2, "renderer second page")
 assert(renderer:snapshot().items == 9, "renderer snapshot")
 assert(renderer:snapshot().font == "AIDA Noto Sans SC", "renderer font snapshot")
 assert(renderer:snapshot().font_engine == "stb_truetype", "renderer font engine")
+assert(software_clear_count >= 3 and software_flush_count >= 3, "software pages rerender and flush")
+local saw_sensor_value = false
+local saw_sensor_label = false
+local saw_sensor_unit = false
+for _, rendered in ipairs(software_texts) do
+  if rendered.text == "42" then saw_sensor_value = true end
+  if rendered.text == "CPU" then saw_sensor_label = true end
+  if rendered.text == "%" then saw_sensor_unit = true end
+end
+assert(saw_sensor_value, "sensor value alpha-composited into page surface")
+assert(saw_sensor_label, "sensor label alpha-composited into page surface")
+assert(saw_sensor_unit, "sensor unit alpha-composited into page surface")
 
 local routes = {}
 local saved_config = ""

@@ -73,12 +73,15 @@ points are converted to CSS pixels (`pt × 4/3`) and rendered at the resulting
 integer size rather than snapped to a firmware bitmap size.
 
 The bundled native `aida_font.so` module uses `stb_truetype` to rasterize one
-OFL-licensed, GB2312-subsetted Noto Sans SC TrueType face from SD into RGB565
-text canvases. A 512 KiB LRU glyph cache avoids rebuilding common digits and
-labels on each SSE update. The regular outline is also used to synthesize bold
-and italic variants; underline, strikethrough, and `text-shadow` are composited
-by the renderer. If the module or TTF cannot load, the app reports the reason
-in WebUI and keeps a firmware-font fallback visible.
+OFL-licensed, GB2312-subsetted Noto Sans SC TrueType face. It maintains a
+320×240 RGB565 page surface in PSRAM and blends glyph A8 coverage, shadows,
+graphs, arcs, and Sensor text before the firmware sees the frame. This avoids
+firmware chroma-key limitations and preserves overlapping content. A 512 KiB
+LRU glyph cache avoids rebuilding common digits and labels on each SSE update.
+The regular outline is also used to synthesize bold and italic variants;
+underline, strikethrough, and `text-shadow` are composited by the renderer. If
+the module or TTF cannot load, the app reports the reason in WebUI and keeps a
+firmware-font fallback visible.
 
 Remote images are stored under `/sd/apps/aida_monitor/cache`. A layout `ReLoad` rebuilds the UI and refreshes the resources so replacing an image under the same filename is reflected on the device.
 

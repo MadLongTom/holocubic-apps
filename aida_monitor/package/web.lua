@@ -149,7 +149,7 @@ local function build_html(api)
 const API="]=] .. api .. [=[";const $=id=>document.getElementById(id);let state={};
 function path(v,d){v=(v||"").trim()||d;return v[0]==="/"?v:"/"+v}function base(){return "http://"+$("host").value.trim()+":"+$("port").value.trim()}function sync(){ $("preview").textContent=base()+path($("layout").value,"/") }
 function tone(text,kind){$("status").textContent=text;$("status").className="status "+(kind||"")}
-function bytes(n){n=Number(n)||0;return n>1048576?(n/1048576).toFixed(1)+"M":n>1024?Math.round(n/1024)+"K":n+"B"}function runtime(d){$("rtStatus").textContent=d.status||"--";$("rtPage").textContent=(d.page||0)+"/"+(d.pages||0);$("rtItems").textContent=d.items||0;let n=$("rtImages"),skip=d.images_skipped||0;n.textContent=(d.images_loaded||0)+"/"+((d.images_loaded||0)+skip);n.className=skip?"warn":"";$("fontState").textContent=d.font_loaded?("ENGINE // "+(d.font_engine||"VECTOR").toUpperCase()+" · CACHE "+bytes(d.font_cache_bytes)):"ENGINE // FALLBACK"}function apply(d){state=d;$("host").value=d.host||"";$("port").value=d.port||9999;$("layout").value=d.layout_path||"/";$("stream").value=d.path||"/sse";runtime(d);sync()}
+function bytes(n){n=Number(n)||0;return n>1048576?(n/1048576).toFixed(1)+"M":n>1024?Math.round(n/1024)+"K":n+"B"}function runtime(d){$("rtStatus").textContent=d.status||"--";$("rtPage").textContent=(d.page||0)+"/"+(d.pages||0);$("rtItems").textContent=d.items||0;let n=$("rtImages"),skip=d.images_skipped||0;n.textContent=(d.images_loaded||0)+"/"+((d.images_loaded||0)+skip);n.className=skip?"warn":"";$("fontState").textContent=d.font_loaded?("ENGINE // "+(d.font_engine||"VECTOR").toUpperCase()+" · "+(d.compositor||"RGB565-A8").toUpperCase()+" · SURFACE "+bytes(d.surface_bytes)):"ENGINE // FALLBACK"}function apply(d){state=d;$("host").value=d.host||"";$("port").value=d.port||9999;$("layout").value=d.layout_path||"/";$("stream").value=d.path||"/sse";runtime(d);sync()}
 async function load(){let r=await fetch(API+"/state?_="+Date.now(),{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status);let d=await r.json();apply(d);let err=d.font_error?("矢量字体已回退："+d.font_error):d.image_error?("图像已安全跳过："+d.image_error):"设备状态已同步。";tone(err,(d.font_error||d.image_error)?"err":"ok")}
 $("form").addEventListener("submit",async e=>{e.preventDefault();try{tone("正在保存并重新读取布局...");let q=new URLSearchParams({host:$("host").value.trim(),port:$("port").value.trim(),layout_path:path($("layout").value,"/"),path:path($("stream").value,"/sse")});let r=await fetch(API+"/save?"+q,{cache:"no-store"});let d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||"保存失败");apply(d);tone("已保存，正在用矢量字体重载布局。","ok")}catch(err){tone(err.message,"err")}});
 $("openLayout").onclick=()=>window.open(base()+path($("layout").value,"/"),"_blank");$("openStream").onclick=()=>window.open(base()+path($("stream").value,"/sse"),"_blank");["host","port","layout","stream"].forEach(id=>$(id).addEventListener("input",sync));load().catch(e=>tone(e.message,"err"));setInterval(()=>fetch(API+"/state?_="+Date.now(),{cache:"no-store"}).then(r=>r.json()).then(runtime).catch(()=>{}),3000);
@@ -193,6 +193,9 @@ function Web.new(opts)
       internal_free = runtime.internal_free or 0,
       psram_free = runtime.psram_free or 0,
       psram_largest = runtime.psram_largest or 0,
+      compositor = runtime.compositor or "legacy-canvas",
+      surface_bytes = runtime.surface_bytes or 0,
+      surface_flushes = runtime.surface_flushes or 0,
     }
   end
 
