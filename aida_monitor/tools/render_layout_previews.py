@@ -1,0 +1,604 @@
+#!/usr/bin/env python3
+"""Render AIDA64 RemoteSensor layouts to native 320x240 PNG previews.
+
+With no arguments the script renders the comprehensive test fixture. Pass
+--aida to fetch the current layout and one SSE update from a running AIDA64
+RemoteSensor instance.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import html as html_module
+import io
+import json
+import math
+import re
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from PIL import Image, ImageDraw, ImageFont
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_LAYOUT = ROOT / "tests" / "fixtures" / "remotesensor-layout.html"
+W, H = 320, 240
+
+
+def number(value: object, fallback: float = 0) -> float:
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", str(value or ""))
+    return float(match.group(0)) if match else fallback
+
+
+def integer(value: object, fallback: int = 0) -> int:
+    return round(number(value, fallback))
+
+
+def color(value: object, fallback: str = "#000000") -> str:
+    match = re.search(r"#([0-9a-fA-F]{6})", str(value or ""))
+    return f"#{match.group(1).upper()}" if match else fallback
+
+
+def parse_style(raw: str | None) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for part in (raw or "").split(";"):
+        if ":" in part:
+            key, value = part.split(":", 1)
+            result[key.strip().lower()] = value.strip()
+    return result
+
+
+def geometry(style: dict[str, str]) -> dict[str, int]:
+    return {key: integer(style.get(css, 0)) for key, css in {
+        "x": "left", "y": "top", "w": "width", "h": "height"
+    }.items()}
+
+
+def gradients(raw: object, fallback: str) -> tuple[str, str]:
+    values = re.findall(r"#[0-9a-fA-F]{6}", str(raw or ""))[:2]
+    if not values:
+        values = [fallback]
+    if len(values) == 1:
+        values.append(values[0])
+    return color(values[0], fallback), color(values[1], fallback)
+
+
+def text_style(style: dict[str, str], value: str) -> dict[str, Any]:
+    raw_size = number(style.get("font-size"), 10)
+    size = round(raw_size * 4 / 3) if "pt" in style.get("font-size", "") else round(raw_size)
+    align = style.get("text-align", "right" if style.get("float") == "right" else "left")
+    return {
+        "text": html_module.unescape(value),
+        "color": color(style.get("color"), "#FFFFFF"),
+        "size": max(8, min(48, size)),
+        "family": style.get("font-family", "Arial"),
+        "bold": "bold" in style.get("font-weight", "").lower(),
+        "italic": "italic" in style.get("font-style", "").lower(),
+        "align": align,
+    }
+
+
+def js_arguments(raw: str) -> list[Any]:
+    values = next(csv.reader(io.StringIO(raw), skipinitialspace=True))
+    parsed: list[Any] = []
+    for value in values:
+        value = value.strip()
+        try:
+            parsed.append(float(value) if "." in value else int(value))
+        except ValueError:
+            parsed.append(value)
+    return parsed
+
+
+@dataclass
+class Item:
+    id: str
+    kind: str
+    page: int
+    geometry: dict[str, int]
+    style: dict[str, str] = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Layout:
+    background: str
+    pages: list[list[Item]]
+    items: dict[str, Item]
+    source_base: str | None = None
+    source_dir: Path | None = None
+
+
+def parse_layout(document: str, source_base: str | None = None,
+                 source_dir: Path | None = None) -> Layout:
+    background = color(re.search(r"background-color:\s*(#[0-9a-fA-F]+)", document).group(1)
+                       if re.search(r"background-color:\s*(#[0-9a-fA-F]+)", document) else None)
+    pages: list[list[Item]] = [[]]
+    items: dict[str, Item] = {}
+    page = 0
+    image_index = 0
+
+    def add(item: Item) -> None:
+        while len(pages) <= item.page:
+            pages.append([])
+        pages[item.page].append(item)
+        items[item.id] = item
+
+    for raw_line in document.splitlines():
+        line = raw_line.strip().replace("\r", "")
+        page_match = re.search(r'<div id="page(\d+)"', line)
+        if page_match:
+            page = int(page_match.group(1))
+            while len(pages) <= page:
+                pages.append([])
+            continue
+
+        match = re.search(r'<div id="(SI\d+)" style="([^"]*)">(.*)</div>', line)
+        if match:
+            item_id, raw_style, inner = match.groups()
+            outer = parse_style(raw_style)
+            data: dict[str, Any] = {}
+            value_match = re.search(r'<div id="(SIV\d+)" style="([^"]*)">(.*?)</div>', inner)
+            if value_match:
+                value_id, value_raw, value = value_match.groups()
+                data["value_id"] = value_id
+                data["value_style"] = parse_style(value_raw)
+                data["value"] = text_style(data["value_style"], value)
+            generic = re.findall(r'<div style="([^"]*)">(.*?)</div>', inner)
+            for child_raw, child_text in generic:
+                child_style = parse_style(child_raw)
+                entry = {"style": child_style, "text": text_style(child_style, child_text)}
+                if child_style.get("float", "").lower() == "left" and "label" not in data:
+                    data["label"] = entry
+                elif "right" in child_style:
+                    data["unit"] = entry
+            bar_match = re.search(
+                r'<div id="(Bar\d+bg)" style="([^"]*)"><span id="(Bar\d+fg)" style="([^"]*)"></span></div>',
+                inner,
+            )
+            if bar_match:
+                bg_id, bg_raw, fg_id, fg_raw = bar_match.groups()
+                bg_style, fg_style = parse_style(bg_raw), parse_style(fg_raw)
+                data["bar"] = {
+                    "id": f"Bar{re.search(r'\d+', bg_id).group(0)}p",
+                    "bg_style": bg_style,
+                    "fg_style": fg_style,
+                    "geometry": geometry(bg_style),
+                    "percent": number(fg_style.get("width")),
+                    "background": gradients(bg_style.get("background"), "#202020"),
+                    "foreground": gradients(fg_style.get("background"), "#00FF00"),
+                }
+            item = Item(item_id, "sensor", page, geometry(outer), outer, data)
+            add(item)
+            if data.get("value_id"):
+                items[data["value_id"]] = item
+            if data.get("bar"):
+                items[data["bar"]["id"]] = item
+            continue
+
+        match = re.search(r'<span id="(Label\d+)" style="([^"]*)">(.*?)</span>', line)
+        if match:
+            item_id, raw_style, value = match.groups()
+            style = parse_style(raw_style)
+            add(Item(item_id, "label", page, geometry(style), style,
+                     {"text": text_style(style, value)}))
+            continue
+
+        match = re.search(
+            r'<span style="([^"]*)"><span id="(Simple\d+)" style="([^"]*)">(.*?)</span></span>', line
+        )
+        if match:
+            outer_raw, item_id, inner_raw, value = match.groups()
+            outer, inner = parse_style(outer_raw), parse_style(inner_raw)
+            merged = {**outer, **inner}
+            add(Item(item_id, "simple", page, geometry(outer), merged,
+                     {"text": text_style(merged, value)}))
+            continue
+
+        match = re.search(r'<span id="(Simple\d+)" style="([^"]*)">(.*?)</span>', line)
+        if match:
+            item_id, raw_style, value = match.groups()
+            style = parse_style(raw_style)
+            add(Item(item_id, "simple", page, geometry(style), style,
+                     {"text": text_style(style, value)}))
+            continue
+
+        match = re.search(
+            r'<canvas id="((?:Gph|Arc)\d+)" width="(\d+)px" height="(\d+)px" style="([^"]*)"></canvas>', line
+        )
+        if match:
+            item_id, width, height, raw_style = match.groups()
+            style = parse_style(raw_style)
+            geom = geometry(style)
+            geom.update(w=int(width), h=int(height))
+            kind = "graph" if item_id.startswith("Gph") else "arc"
+            add(Item(item_id, kind, page, geom, style, {"history": []}))
+            items[item_id + "p"] = items[item_id]
+            continue
+
+        match = re.search(r'<div style="([^"]*)"><img[^>]*src="([^"]+)"[^>]*></div>', line)
+        if match:
+            raw_style, src = match.groups()
+            image_index += 1
+            style = parse_style(raw_style)
+            add(Item(f"Image{image_index}", "image", page, geometry(style), style,
+                     {"src": html_module.unescape(src)}))
+
+    for call in re.finditer(r'DrawGraph\((.*?)\);', document):
+        values = js_arguments(call.group(1))
+        item = items.get(str(values[0]))
+        if not item:
+            continue
+        item.data["params"] = {
+            "type": str(values[3]), "step": int(values[4]), "thick": int(values[5]),
+            "grid_density": int(values[6]), "min": float(values[7]), "max": float(values[8]),
+            "autoscale": int(values[9]) == 1, "base100": int(values[10]) == 1,
+            "show_background": int(values[11]) == 1, "background": color(values[12]),
+            "show_frame": int(values[13]) == 1, "frame": color(values[14], "#808080"),
+            "show_grid": int(values[15]) == 1, "grid": color(values[16], "#404040"),
+            "graph": color(values[17], "#FFFFFF"), "show_scale": int(values[18]) == 1,
+            "font_color": color(values[20], "#FFFFFF"), "font_size": integer(values[21], 8),
+            "right_align": int(values[25]) == 1,
+        }
+        suffix = re.search(r"\d+", item.id).group(0)
+        offset = re.search(rf"var gphgridofs{suffix}\s*=\s*(-?\d+)", document)
+        maximum = re.search(rf"gpharray{suffix}\.length\s*>\s*(\d+)", document)
+        item.data["grid_offset"] = int(offset.group(1)) if offset else 0
+        item.data["max_points"] = int(maximum.group(1)) if maximum else 49
+
+    for call in re.finditer(r'DrawArcGauge\((.*?)\);', document):
+        values = js_arguments(call.group(1))
+        item = items.get(str(values[0]))
+        if not item:
+            continue
+        item.data["params"] = {
+            "thickness": int(values[1]), "start": float(values[2]),
+            "fill": int(values[6]) == 1, "fill_color": color(values[7]),
+            "show_text": int(values[8]) == 1, "font_color": color(values[11], "#FFFFFF"),
+            "font_size": integer(values[12], 10),
+        }
+        item.data.update(percent=0, display_text="0", background_color="#202020", active_color="#00FF00")
+
+    while len(pages) > 1 and not pages[-1]:
+        pages.pop()
+    return Layout(background, pages, items, source_base, source_dir)
+
+
+def parse_sse(payload: str) -> tuple[int | None, list[dict[str, Any]]]:
+    page: int | None = None
+    updates: list[dict[str, Any]] = []
+    for entry in payload.split("{|}"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        page_match = re.fullmatch(r"Page(\d+)", entry)
+        if page_match:
+            page = int(page_match.group(1))
+            continue
+        fields = entry.split("|")
+        item_id = fields[0]
+        if re.fullmatch(r"(?:SIV|Simple)\d+", item_id):
+            updates.append({"id": item_id, "kind": "text", "text": html_module.unescape(fields[1] if len(fields) > 1 else "")})
+        elif re.fullmatch(r"Bar\d+p", item_id):
+            updates.append({"id": item_id, "kind": "bar", "percent": number(fields[1] if len(fields) > 1 else 0),
+                            "background": gradients(fields[2] if len(fields) > 2 else "", "#202020"),
+                            "foreground": gradients(fields[3] if len(fields) > 3 else "", "#00FF00")})
+        elif re.fullmatch(r"Gph\d+p", item_id):
+            updates.append({"id": item_id, "kind": "graph", "value": number(fields[1] if len(fields) > 1 else 0)})
+        elif re.fullmatch(r"Arc\d+p", item_id):
+            updates.append({"id": item_id, "kind": "arc", "percent": number(fields[1] if len(fields) > 1 else 0),
+                            "text": html_module.unescape(fields[2] if len(fields) > 2 else ""),
+                            "background_color": color(fields[3] if len(fields) > 3 else "", "#202020"),
+                            "active_color": color(fields[4] if len(fields) > 4 else "", "#00FF00")})
+    return page, updates
+
+
+def apply_updates(layout: Layout, updates: list[dict[str, Any]]) -> None:
+    for update in updates:
+        item = layout.items.get(update["id"])
+        if not item:
+            continue
+        if update["kind"] == "text":
+            if item.kind == "sensor":
+                item.data["value"]["text"] = update["text"]
+            else:
+                item.data["text"]["text"] = update["text"]
+        elif update["kind"] == "bar" and item.data.get("bar"):
+            item.data["bar"].update(percent=update["percent"], background=update["background"],
+                                    foreground=update["foreground"])
+        elif update["kind"] == "graph":
+            item.data["history"].append(update["value"])
+        elif update["kind"] == "arc":
+            item.data.update(percent=update["percent"], display_text=update["text"],
+                             background_color=update["background_color"], active_color=update["active_color"])
+
+
+_FONTS: dict[tuple[str, int, bool, bool], ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
+
+
+def font(family: str, size: int, bold: bool = False, italic: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    key = (family, size, bold, italic)
+    if key in _FONTS:
+        return _FONTS[key]
+    windows = Path("C:/Windows/Fonts")
+    family_lower = family.lower()
+    if "tahoma" in family_lower:
+        name = "tahomabd.ttf" if bold else "tahoma.ttf"
+    elif "consol" in family_lower or "mono" in family_lower:
+        name = "consolaz.ttf" if italic else "consolab.ttf" if bold else "consola.ttf"
+    else:
+        name = "arialbi.ttf" if bold and italic else "arialbd.ttf" if bold else "ariali.ttf" if italic else "arial.ttf"
+    path = windows / name
+    try:
+        value = ImageFont.truetype(str(path), max(1, size))
+    except OSError:
+        value = ImageFont.load_default()
+    _FONTS[key] = value
+    return value
+
+
+def draw_text(draw: ImageDraw.ImageDraw, xy: tuple[int, int], width: int, style: dict[str, Any],
+              override: str | None = None) -> None:
+    value = str(style.get("text", "") if override is None else override)
+    fnt = font(style.get("family", "Arial"), int(style.get("size", 10)), style.get("bold", False), style.get("italic", False))
+    x, y = xy
+    if width > 0 and style.get("align") in {"right", "center"}:
+        box = draw.textbbox((0, 0), value, font=fnt)
+        text_width = box[2] - box[0]
+        x += width - text_width if style["align"] == "right" else (width - text_width) // 2
+    draw.text((x, y - 1), value, font=fnt, fill=style.get("color", "#FFFFFF"))
+
+
+def vertical_gradient(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], colors: tuple[str, str]) -> None:
+    x1, y1, x2, y2 = box
+    if x2 < x1 or y2 < y1:
+        return
+    rgb1 = tuple(int(colors[0][i:i + 2], 16) for i in (1, 3, 5))
+    rgb2 = tuple(int(colors[1][i:i + 2], 16) for i in (1, 3, 5))
+    height = max(1, y2 - y1)
+    for y in range(y1, y2 + 1):
+        ratio = (y - y1) / height
+        mixed = tuple(round(a + (b - a) * ratio) for a, b in zip(rgb1, rgb2))
+        draw.line((x1, y, x2, y), fill=mixed)
+
+
+def graph_range(item: Item) -> tuple[float, float]:
+    params, history = item.data["params"], item.data["history"]
+    low, high = params["min"], params["max"]
+    if params["autoscale"] and history:
+        low, high = min(history), max(history)
+        if params["base100"]:
+            low, high = round(low * .009) * 100, round(high * .011) * 100
+        else:
+            low, high = round(low * .9), round(high * 1.1)
+    if high <= low:
+        high = low + max(1, abs(low * .1))
+    return low, high
+
+
+def render_graph(draw: ImageDraw.ImageDraw, item: Item, page_background: str) -> None:
+    g, p = item.geometry, item.data.get("params", {})
+    if not p:
+        return
+    x, y, w, h = g["x"], g["y"], g["w"], g["h"]
+    draw.rectangle((x, y, x + w - 1, y + h - 1), fill=p["background"] if p["show_background"] else page_background)
+    left, top, right, bottom = x, y, x + w - 1, y + h - 1
+    if p["show_frame"]:
+        left, top, right, bottom = left + 1, top + 1, right - 1, bottom - 1
+    scale_width = min(28, max(18, p["font_size"] * 3)) if p["show_scale"] else 0
+    if p["show_scale"]:
+        if p["right_align"]:
+            right -= scale_width
+        else:
+            left += scale_width
+    low, high = graph_range(item)
+    if p["show_grid"]:
+        density = max(2, p["grid_density"])
+        gx = left + item.data.get("grid_offset", 0) % density
+        while gx <= right:
+            draw.line((gx, top, gx, bottom), fill=p["grid"])
+            gx += density
+        gy = top
+        while gy <= bottom:
+            draw.line((left, gy, right, gy), fill=p["grid"])
+            gy += density
+    history = item.data["history"][-item.data.get("max_points", 49):]
+    plot_h = max(1, bottom - top)
+    points = [(right - (len(history) - 1 - index) * max(1, p["step"]),
+               bottom - round(max(0, min(1, (value - low) / (high - low))) * plot_h))
+              for index, value in enumerate(history)]
+    points = [(px, py) for px, py in points if px >= left]
+    if p["type"] == "HG":
+        for px, py in points:
+            draw.rectangle((px, py, px + max(1, p["step"] - 1), bottom), fill=p["graph"])
+    elif points:
+        if p["type"] == "AG" and len(points) > 1:
+            overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            area = ImageDraw.Draw(overlay)
+            area.polygon(points + [(points[-1][0], bottom), (points[0][0], bottom)], fill=(*tuple(int(p["graph"][i:i + 2], 16) for i in (1, 3, 5)), 84))
+            draw._image.alpha_composite(overlay)
+        if len(points) > 1:
+            draw.line(points, fill=p["graph"], width=max(1, p["thick"]), joint="curve")
+    if p["show_scale"]:
+        style = {"family": "Arial", "size": p["font_size"], "color": p["font_color"], "align": "left" if p["right_align"] else "right"}
+        tx = right + 2 if p["right_align"] else x
+        draw_text(draw, (tx, top), scale_width - 2, style, str(round(high)))
+        draw_text(draw, (tx, max(top, bottom - p["font_size"])), scale_width - 2, style, str(round(low)))
+    if p["show_frame"]:
+        draw.rectangle((x, y, x + w - 1, y + h - 1), outline=p["frame"])
+
+
+def render_arc(draw: ImageDraw.ImageDraw, item: Item, page_background: str) -> None:
+    g, p = item.geometry, item.data.get("params", {})
+    if not p:
+        return
+    x, y, w, h = g["x"], g["y"], g["w"], g["h"]
+    draw.rectangle((x, y, x + w - 1, y + h - 1), fill=page_background)
+    diameter = min(w, h) - 2
+    box = (x + (w - diameter) // 2, y + (h - diameter) // 2,
+           x + (w + diameter) // 2, y + (h + diameter) // 2)
+    thickness = max(1, min(p["thickness"], diameter // 2))
+    if p["fill"]:
+        inset = thickness
+        draw.ellipse((box[0] + inset, box[1] + inset, box[2] - inset, box[3] - inset), fill=p["fill_color"])
+    draw.arc(box, 0, 359, fill=item.data.get("background_color", "#202020"), width=thickness)
+    start = p["start"]
+    draw.arc(box, start, start + max(0, min(100, item.data.get("percent", 0))) * 3.6,
+             fill=item.data.get("active_color", "#00FF00"), width=thickness)
+    if p["show_text"]:
+        value = str(item.data.get("display_text", ""))
+        fnt = font("Arial", p["font_size"])
+        bbox = draw.textbbox((0, 0), value, font=fnt)
+        draw.text((x + (w - (bbox[2] - bbox[0])) // 2, y + (h - (bbox[3] - bbox[1])) // 2 - bbox[1]),
+                  value, font=fnt, fill=p["font_color"])
+
+
+def load_resource(layout: Layout, src: str) -> Image.Image | None:
+    try:
+        if layout.source_base:
+            with urllib.request.urlopen(urllib.parse.urljoin(layout.source_base.rstrip("/") + "/", src), timeout=3) as response:
+                return Image.open(io.BytesIO(response.read())).convert("RGBA")
+        if layout.source_dir:
+            path = layout.source_dir / urllib.parse.unquote(src)
+            if path.exists():
+                with Image.open(path) as image:
+                    image.seek(0)
+                    return image.convert("RGBA")
+    except Exception:
+        return None
+    return None
+
+
+def render_page(layout: Layout, page_index: int) -> Image.Image:
+    image = Image.new("RGBA", (W, H), layout.background)
+    draw = ImageDraw.Draw(image)
+    for item in layout.pages[page_index]:
+        g = item.geometry
+        if item.kind in {"label", "simple"}:
+            draw_text(draw, (g["x"], g["y"]), g["w"] or W - g["x"], item.data["text"])
+        elif item.kind == "sensor":
+            width = g["w"] or W - g["x"]
+            if item.data.get("label"):
+                draw_text(draw, (g["x"], g["y"]), width, item.data["label"]["text"])
+            if item.data.get("value"):
+                value_x = g["x"] + integer(item.data["value_style"].get("left"))
+                draw_text(draw, (value_x, g["y"]), width - (value_x - g["x"]), item.data["value"])
+            if item.data.get("unit"):
+                unit = dict(item.data["unit"]["text"])
+                unit["align"] = "right"
+                draw_text(draw, (g["x"], g["y"]), width, unit)
+            bar = item.data.get("bar")
+            if bar:
+                bg = bar["geometry"]
+                bx, by = g["x"] + bg["x"], g["y"] + bg["y"]
+                bw, bh = bg["w"] or width, bg["h"] or 4
+                vertical_gradient(draw, (bx, by, bx + bw - 1, by + bh - 1), bar["background"])
+                fill_width = round(bw * max(0, min(100, bar["percent"])) / 100)
+                if fill_width:
+                    vertical_gradient(draw, (bx, by, bx + fill_width - 1, by + bh - 1), bar["foreground"])
+        elif item.kind == "graph":
+            render_graph(draw, item, layout.background)
+        elif item.kind == "arc":
+            render_arc(draw, item, layout.background)
+        elif item.kind == "image":
+            resource = load_resource(layout, item.data["src"])
+            if resource:
+                image.alpha_composite(resource, (g["x"], g["y"]))
+            else:
+                draw.rectangle((g["x"], g["y"], g["x"] + 15, g["y"] + 15), outline="#FF00FF")
+                draw.line((g["x"], g["y"], g["x"] + 15, g["y"] + 15), fill="#FF00FF")
+                draw.line((g["x"] + 15, g["y"], g["x"], g["y"] + 15), fill="#FF00FF")
+    return image
+
+
+def demo_updates(layout: Layout) -> None:
+    payload = "Page0{|}SIV3|42{|}Bar3p|42|#202020,#151515|#00FF00,#00AA00{|}Arc7p|42|42|#202020|#00FF00{|}Simple11|CPU Temp 48°C{|}"
+    _, updates = parse_sse(payload)
+    apply_updates(layout, updates)
+    for item in {id(value): value for key, value in layout.items.items() if key.startswith("Gph")}.values():
+        phase = integer(re.search(r"\d+", item.id).group(0)) * .7
+        item.data["history"] = [max(0, min(100, 48 + 31 * math.sin(index / 5 + phase) + 9 * math.sin(index / 2.3)))
+                                for index in range(item.data.get("max_points", 49))]
+
+
+def fetch_live(base: str, layout_url: str | None = None, stream_url: str | None = None) -> tuple[str, str | None]:
+    base = base.rstrip("/")
+    request = urllib.request.Request(layout_url or base + "/", headers={"Accept-Encoding": "identity", "Cache-Control": "no-cache"})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        document = response.read().decode("utf-8", errors="replace")
+    payload = None
+    stream = urllib.request.Request(stream_url or base + "/sse", headers={"Accept": "text/event-stream", "Cache-Control": "no-cache"})
+    try:
+        with urllib.request.urlopen(stream, timeout=5) as response:
+            for _ in range(200):
+                line = response.readline().decode("utf-8", errors="replace").strip()
+                if line.startswith("data:"):
+                    payload = line[5:].strip()
+                    if payload:
+                        break
+    except Exception as error:
+        print(f"warning: SSE sample unavailable ({error}); using layout defaults")
+    return document, payload
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--aida", help="RemoteSensor base URL, e.g. http://192.168.0.232:9999")
+    source.add_argument("--device", help="HoloCubic base URL; reads its AIDA Monitor WebUI state")
+    source.add_argument("--layout", type=Path, help="local RemoteSensor HTML file")
+    parser.add_argument("--output", type=Path, default=ROOT / "art" / "local-previews")
+    args = parser.parse_args()
+
+    if args.device:
+        state_url = args.device.rstrip("/") + "/aida_monitor/api/state"
+        with urllib.request.urlopen(state_url, timeout=5) as response:
+            state = json.load(response)
+        layout_url = str(state["layout_url"])
+        stream_url = str(state["stream_url"])
+        parsed = urllib.parse.urlsplit(layout_url)
+        aida_base = f"{parsed.scheme}://{parsed.netloc}"
+        document, payload = fetch_live(aida_base, layout_url, stream_url)
+        layout = parse_layout(document, source_base=aida_base)
+        if payload:
+            _, updates = parse_sse(payload)
+            apply_updates(layout, updates)
+        source_name = f"{args.device.rstrip('/')} -> {aida_base}"
+    elif args.aida:
+        document, payload = fetch_live(args.aida)
+        layout = parse_layout(document, source_base=args.aida)
+        if payload:
+            _, updates = parse_sse(payload)
+            apply_updates(layout, updates)
+        source_name = args.aida
+    else:
+        source_path = (args.layout or DEFAULT_LAYOUT).resolve()
+        document = source_path.read_text(encoding="utf-8")
+        layout = parse_layout(document, source_dir=source_path.parent)
+        demo_updates(layout)
+        source_name = str(source_path)
+
+    args.output.mkdir(parents=True, exist_ok=True)
+    pages: list[Image.Image] = []
+    for index in range(len(layout.pages)):
+        image = render_page(layout, index)
+        image.convert("RGB").save(args.output / f"page-{index + 1}.png", optimize=True)
+        pages.append(image)
+
+    gap, title_height = 8, 28
+    overview = Image.new("RGB", (W * len(pages) + gap * max(0, len(pages) - 1), H + title_height), "#080B10")
+    overview_draw = ImageDraw.Draw(overview)
+    for index, image in enumerate(pages):
+        x = index * (W + gap)
+        overview.paste(image.convert("RGB"), (x, title_height))
+        overview_draw.text((x + 6, 6), f"PAGE {index + 1}", font=font("Consolas", 12, bold=True), fill="#49B6FF")
+    overview.save(args.output / "overview.png", optimize=True)
+    print(json.dumps({"output": str(args.output.resolve()), "pages": len(pages), "source": source_name}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

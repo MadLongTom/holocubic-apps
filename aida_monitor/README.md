@@ -94,6 +94,39 @@ npx -y luaparse -q aida_monitor/package/aida_renderer.lua
 npx -y luaparse -q aida_monitor/package/aida_client.lua
 ```
 
+## Local screenshot previews
+
+Render the comprehensive two-page protocol fixture locally at the native
+320×240 device size:
+
+```powershell
+python aida_monitor/tools/render_layout_previews.py
+```
+
+The output is written to `aida_monitor/art/local-previews` and contains one PNG
+per RemoteSensor page plus `overview.png`.
+
+To preview the layout and current values directly from a running AIDA64 host:
+
+```powershell
+python aida_monitor/tools/render_layout_previews.py `
+  --aida http://192.168.0.232:9999 `
+  --output aida_monitor/art/live-previews
+```
+
+Like HoloPet's preview helper, it can also discover the configured AIDA64 host
+through the HoloCubic management endpoint:
+
+```powershell
+python aida_monitor/tools/render_layout_previews.py `
+  --device http://192.168.0.102 `
+  --output aida_monitor/art/device-previews
+```
+
+The local renderer mirrors the app's 1:1 positions, font-size mapping,
+gradients, graph histories, Arc Gauge, image placement, page background, and
+SSE field updates. It uses the first GIF frame, matching a static screenshot.
+
 ## Official AIDA64 references
 
 - [RemoteSensor LCD for smartphones and tablets](https://forums.aida64.com/topic/2636-remotesensor-lcd-for-smartphones-and-tablets/)
