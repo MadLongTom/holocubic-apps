@@ -1,5 +1,6 @@
 local Layout = dofile("aida_monitor/package/aida_layout.lua")
 local AidaClient = dofile("aida_monitor/package/aida_client.lua")
+local Pager = dofile("aida_monitor/package/aida_pager.lua")
 
 local html = dofile("aida_monitor/tests/fixtures/remotesensor-layout.lua")
 
@@ -76,6 +77,18 @@ local hidden_sample = AidaClient.parse_remote_payload("Simple11||{|}Gph4p||{|}Ar
 assert(hidden_sample.updates[1].visible == false, "empty text hides RemoteSensor item")
 assert(hidden_sample.updates[2].kind == "graph_clear", "empty graph update clears canvas")
 assert(hidden_sample.updates[3].visible == false, "empty arc text hides gauge")
+
+local pager = Pager.new({ tilt_page_cooldown_ms = 1000 })
+local page, changed = pager:step(1, 3, 1, 0)
+assert(changed and page == 2, "right tilt advances one page")
+page, changed = pager:step(page, 3, 1, 50)
+assert(not changed and page == 2, "event burst is absorbed by cooldown")
+page, changed = pager:step(page, 3, -1, 1000)
+assert(changed and page == 1, "left tilt returns one page after cooldown")
+page, changed = pager:step(page, 3, -1, 2000)
+assert(changed and page == 3, "tilt paging wraps at the edge")
+assert(pager:accept_remote(1, 3) == nil, "SSE Page does not override local tilt page")
+assert(pager:restore(2) == 2, "local page is clamped across layout reload")
 
 local captured_vector_options = nil
 package.preload["aida_font_test"] = function()
@@ -336,11 +349,14 @@ assert(page.body:find("AIDA Noto Sans SC", 1, true), "vector font guidance")
 assert(page.body:find("下载并安装同款 TTF", 1, true), "font download")
 assert(page.body:find("B / I / U / S / SHADOW", 1, true), "style support")
 assert(page.body:find("子像素排列", 1, true), "subpixel configuration")
+assert(page.body:find("翻页冷却 ms", 1, true), "tilt page cooldown configuration")
 local saved = web:save({ query = "host=192.168.0.232&port=9999&layout_path=%2F&path=%2Fsse" })
 assert(saved.status == "200 OK", "web config save")
 assert(saved_config:find('config.vector_font_family = "AIDA Noto Sans SC"', 1, true), "vector family persisted")
 assert(saved_config:find("aida_font.so", 1, true), "vector module persisted")
 assert(saved_config:find('config.font_subpixel = "rgb"', 1, true), "subpixel mode persisted")
+assert(saved_config:find("config.tilt_page_cooldown_ms = 1000", 1, true),
+  "tilt page cooldown persisted")
 assert(not saved_config:find("config.font =", 1, true), "legacy font selection removed")
 
 print("RemoteSensor protocol tests passed")

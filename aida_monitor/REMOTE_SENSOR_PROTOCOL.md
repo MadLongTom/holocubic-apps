@@ -127,6 +127,17 @@ ReLoad
 Unknown IDs and commands are ignored so values from a stale/reloading page do
 not terminate the app.
 
+### Local gravity paging
+
+HoloCubic maps physical left/right tilt gestures to `key.LEFT` and `key.RIGHT`.
+The app changes the already-built RemoteSensor page locally, wraps at both ends,
+and handles only the gesture's `START` edge; its matching `SHORT` release is
+ignored. A configurable cooldown (1000 ms by default) also absorbs threshold
+bounce. After the first local tilt, incoming SSE
+values continue updating every page, but SSE `PageN` commands are ignored so
+the server cannot immediately pull the display back to `Page0`. The selected
+local page is retained and clamped when a `ReLoad` changes the page count.
+
 ## HoloCubic compositor
 
 The browser's stacking model is reproduced explicitly:

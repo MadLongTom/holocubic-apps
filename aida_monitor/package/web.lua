@@ -83,6 +83,7 @@ config.vector_font_family = %q
 config.vector_font_module = %q
 config.vector_font_path = %q
 config.font_subpixel = %q
+config.tilt_page_cooldown_ms = %d
 
 config.timeout_ms = %d
 config.reconnect_ms = %d
@@ -108,6 +109,7 @@ return config
     tostring(config.vector_font_module or "/sd/apps/aida_monitor/modules/aida_font.so"),
     tostring(config.vector_font_path or "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"),
     tostring(config.font_subpixel or "rgb"),
+    tonumber(config.tilt_page_cooldown_ms) or 1000,
     tonumber(config.timeout_ms) or 7000,
     tonumber(config.reconnect_ms) or 2000,
     tonumber(config.stale_ms) or 5000,
@@ -145,15 +147,15 @@ local function build_html(api)
 <header class="head"><div><h1>AIDA64 // REMOTESENSOR</h1><p class="sub">HoloCubic 动态 LCD 布局桥接</p></div><a class="button" href="/main">返回主界面</a></header>
 <section class="grid"><section class="panel"><h2>&gt; CONNECTION</h2>
 <div class="runtime"><div class="metric"><b id="rtStatus">--</b><span>STATUS</span></div><div class="metric"><b id="rtPage">--</b><span>PAGE</span></div><div class="metric"><b id="rtItems">--</b><span>ITEMS</span></div><div class="metric"><b id="rtImages">--</b><span>IMAGES</span></div></div>
-<form class="form" id="form"><div class="row"><div><label>主机 IP / Host</label><input id="host" required placeholder="192.168.0.232"></div><div><label>RemoteSensor 端口</label><input id="port" inputmode="numeric" required placeholder="9999"></div></div><div class="row"><div><label>布局路径</label><input id="layout" value="/"></div><div><label>SSE 路径</label><input id="stream" value="/sse"></div></div><div class="font-guide"><div class="font-command"><span>AIDA64 FONT</span><strong>AIDA Noto Sans SC</strong></div><div class="font-meta"><code>6–96 PX</code><code>中文 GB2312</code><code>B / I / U / S / SHADOW</code><code>COVERAGE AA</code></div><div class="subpixel-row"><div><label>子像素排列</label><small>彩边方向反了选 BGR；光学模组模糊彩边时关闭。</small></div><select id="subpixel"><option value="rgb">RGB（推荐）</option><option value="bgr">BGR</option><option value="off">关闭</option></select></div><p class="font-copy">请在 AIDA64 的每个 LCD 文本项目中统一选择此字体。设备会按 AIDA64 字号即时栅格化，不再使用固定字号位图。</p><div class="font-actions"><code class="font-state" id="fontState">ENGINE // CHECKING</code><a class="font-download" href="/apps/aida_monitor/font/aida_noto_sans_sc.ttf" download>下载并安装同款 TTF</a></div></div><div class="actions"><button class="primary" type="submit">保存 · 重载布局</button><button type="button" id="openLayout">打开布局</button><button type="button" id="openStream">打开数据流</button></div><div id="status" class="status">正在读取设备状态...</div></form></section>
+<form class="form" id="form"><div class="row"><div><label>主机 IP / Host</label><input id="host" required placeholder="192.168.0.232"></div><div><label>RemoteSensor 端口</label><input id="port" inputmode="numeric" required placeholder="9999"></div></div><div class="row"><div><label>布局路径</label><input id="layout" value="/"></div><div><label>SSE 路径</label><input id="stream" value="/sse"></div></div><div class="row"><div><label>重力翻页</label><input value="LEFT / RIGHT · LOOP" disabled></div><div><label>翻页冷却 ms</label><input id="tiltCooldown" type="number" min="250" max="5000" step="50" value="1000"></div></div><div class="font-guide"><div class="font-command"><span>AIDA64 FONT</span><strong>AIDA Noto Sans SC</strong></div><div class="font-meta"><code>6–96 PX</code><code>中文 GB2312</code><code>B / I / U / S / SHADOW</code><code>COVERAGE AA</code></div><div class="subpixel-row"><div><label>子像素排列</label><small>彩边方向反了选 BGR；光学模组模糊彩边时关闭。</small></div><select id="subpixel"><option value="rgb">RGB（推荐）</option><option value="bgr">BGR</option><option value="off">关闭</option></select></div><p class="font-copy">请在 AIDA64 的每个 LCD 文本项目中统一选择此字体。设备会按 AIDA64 字号即时栅格化，不再使用固定字号位图。</p><div class="font-actions"><code class="font-state" id="fontState">ENGINE // CHECKING</code><a class="font-download" href="/apps/aida_monitor/font/aida_noto_sans_sc.ttf" download>下载并安装同款 TTF</a></div></div><div class="actions"><button class="primary" type="submit">保存 · 重载布局</button><button type="button" id="openLayout">打开布局</button><button type="button" id="openStream">打开数据流</button></div><div id="status" class="status">正在读取设备状态...</div></form></section>
 <aside class="panel"><h2>&gt; AIDA64 SETUP</h2><ol class="steps"><li>在 <strong>Preferences → Hardware Monitoring → LCD</strong> 启用 RemoteSensor。</li><li>端口设置为 <strong>9999</strong>，Preview Resolution 设置为 <strong>320 × 240</strong>。</li><li>直接使用 AIDA64 的 LCD Items 编辑器添加标签、图片、柱条、曲线、Arc Gauge 和页面。</li><li>点击 Apply。设备收到 <code>ReLoad</code> 后会自动重新读取整个布局。</li></ol><p class="note">设备按 320×240 原始坐标渲染，不缩放。SensorPanel 专用 Custom Gauge 不属于 RemoteSensor 协议；请使用 Arc Gauge。</p><code id="preview">http://--:9999/</code></aside></section></main>
 <script>
 const API="]=] .. api .. [=[";const $=id=>document.getElementById(id);let state={};
 function path(v,d){v=(v||"").trim()||d;return v[0]==="/"?v:"/"+v}function base(){return "http://"+$("host").value.trim()+":"+$("port").value.trim()}function sync(){ $("preview").textContent=base()+path($("layout").value,"/") }
 function tone(text,kind){$("status").textContent=text;$("status").className="status "+(kind||"")}
-function bytes(n){n=Number(n)||0;return n>1048576?(n/1048576).toFixed(1)+"M":n>1024?Math.round(n/1024)+"K":n+"B"}function runtime(d){$("rtStatus").textContent=d.status||"--";$("rtPage").textContent=(d.page||0)+"/"+(d.pages||0);$("rtItems").textContent=d.items||0;let n=$("rtImages"),skip=d.images_skipped||0;n.textContent=(d.images_loaded||0)+"/"+((d.images_loaded||0)+skip);n.className=skip?"warn":"";$("fontState").textContent=d.font_loaded?("ENGINE // "+(d.font_engine||"VECTOR").toUpperCase()+" · "+(d.compositor||"RGB565-A8").toUpperCase()+" · SURFACE "+bytes(d.surface_bytes)):"ENGINE // FALLBACK"}function apply(d){state=d;$("host").value=d.host||"";$("port").value=d.port||9999;$("layout").value=d.layout_path||"/";$("stream").value=d.path||"/sse";$("subpixel").value=d.font_subpixel||"rgb";runtime(d);sync()}
+function bytes(n){n=Number(n)||0;return n>1048576?(n/1048576).toFixed(1)+"M":n>1024?Math.round(n/1024)+"K":n+"B"}function runtime(d){$("rtStatus").textContent=d.status||"--";$("rtPage").textContent=(d.page||0)+"/"+(d.pages||0)+(d.page_source==="tilt"?"·TILT":"");$("rtItems").textContent=d.items||0;let n=$("rtImages"),skip=d.images_skipped||0;n.textContent=(d.images_loaded||0)+"/"+((d.images_loaded||0)+skip);n.className=skip?"warn":"";$("fontState").textContent=d.font_loaded?("ENGINE // "+(d.font_engine||"VECTOR").toUpperCase()+" · "+(d.compositor||"RGB565-A8").toUpperCase()+" · SURFACE "+bytes(d.surface_bytes)):"ENGINE // FALLBACK"}function apply(d){state=d;$("host").value=d.host||"";$("port").value=d.port||9999;$("layout").value=d.layout_path||"/";$("stream").value=d.path||"/sse";$("subpixel").value=d.font_subpixel||"rgb";$("tiltCooldown").value=d.tilt_page_cooldown_ms||1000;runtime(d);sync()}
 async function load(){let r=await fetch(API+"/state?_="+Date.now(),{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status);let d=await r.json();apply(d);let err=d.font_error?("矢量字体已回退："+d.font_error):d.image_error?("图像已安全跳过："+d.image_error):"设备状态已同步。";tone(err,(d.font_error||d.image_error)?"err":"ok")}
-$("form").addEventListener("submit",async e=>{e.preventDefault();try{tone("正在保存并重新读取布局...");let q=new URLSearchParams({host:$("host").value.trim(),port:$("port").value.trim(),layout_path:path($("layout").value,"/"),path:path($("stream").value,"/sse"),font_subpixel:$("subpixel").value});let r=await fetch(API+"/save?"+q,{cache:"no-store"});let d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||"保存失败");apply(d);tone("已保存，正在用矢量字体重载布局。","ok")}catch(err){tone(err.message,"err")}});
+$("form").addEventListener("submit",async e=>{e.preventDefault();try{tone("正在保存并重新读取布局...");let q=new URLSearchParams({host:$("host").value.trim(),port:$("port").value.trim(),layout_path:path($("layout").value,"/"),path:path($("stream").value,"/sse"),font_subpixel:$("subpixel").value,tilt_page_cooldown_ms:$("tiltCooldown").value});let r=await fetch(API+"/save?"+q,{cache:"no-store"});let d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||"保存失败");apply(d);tone("已保存，正在用矢量字体重载布局。","ok")}catch(err){tone(err.message,"err")}});
 $("openLayout").onclick=()=>window.open(base()+path($("layout").value,"/"),"_blank");$("openStream").onclick=()=>window.open(base()+path($("stream").value,"/sse"),"_blank");["host","port","layout","stream"].forEach(id=>$(id).addEventListener("input",sync));load().catch(e=>tone(e.message,"err"));setInterval(()=>fetch(API+"/state?_="+Date.now(),{cache:"no-store"}).then(r=>r.json()).then(runtime).catch(()=>{}),3000);
 </script></body></html>]=]
 end
@@ -176,11 +178,13 @@ function Web.new(opts)
       layout_path = normalize_path(self.config.layout_path, "/"),
       path = normalize_path(self.config.path, "/sse"),
       font_subpixel = tostring(self.config.font_subpixel or "rgb"),
+      tilt_page_cooldown_ms = tonumber(self.config.tilt_page_cooldown_ms) or 1000,
       font = tostring(self.config.vector_font_family or "AIDA Noto Sans SC"),
       layout_url = "http://" .. host .. ":" .. port .. normalize_path(self.config.layout_path, "/"),
       stream_url = "http://" .. host .. ":" .. port .. normalize_path(self.config.path, "/sse"),
       status = runtime.status or "STARTING", detail = runtime.detail or "",
       page = runtime.page or 0, pages = runtime.pages or 0, items = runtime.items or 0,
+      page_source = runtime.page_source or "remote",
       counts = runtime.counts or {}, last_event_ms = runtime.last_event_ms or 0,
       images_loaded = runtime.images_loaded or 0,
       images_skipped = runtime.images_skipped or 0,
@@ -224,6 +228,9 @@ function Web.new(opts)
     local subpixel = tostring(query.font_subpixel or self.config.font_subpixel or "rgb"):lower()
     if subpixel ~= "rgb" and subpixel ~= "bgr" and subpixel ~= "off" then subpixel = "off" end
     self.config.font_subpixel = subpixel
+    self.config.tilt_page_cooldown_ms = math.max(250,
+      math.min(5000, math.floor(tonumber(query.tilt_page_cooldown_ms)
+        or tonumber(self.config.tilt_page_cooldown_ms) or 1000)))
     local ok, err = write_config(self.config_path, self.config)
     if not ok then return json_response("500 Internal Server Error", { ok = false, error = "配置写入失败: " .. tostring(err) }) end
     if self.restart then pcall(self.restart) end

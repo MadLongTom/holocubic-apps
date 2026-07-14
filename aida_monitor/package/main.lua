@@ -13,6 +13,7 @@ local Layout = dofile(APP_DIR .. "/aida_layout.lua")
 local Renderer = dofile(APP_DIR .. "/aida_renderer.lua")
 local AidaClient = dofile(APP_DIR .. "/aida_client.lua")
 local VectorFont = dofile(APP_DIR .. "/aida_vector_font.lua")
+local Pager = dofile(APP_DIR .. "/aida_pager.lua")
 local AidaWeb = nil
 if file and file.exists and file.exists(APP_DIR .. "/web.lua") then
   local ok, module = pcall(dofile, APP_DIR .. "/web.lua")
@@ -36,6 +37,7 @@ local state = {
   last_event_ms = 0,
   layout = nil,
   vector_font = VectorFont.new(config),
+  pager = Pager.new(config),
 }
 
 local function log(...)
@@ -136,7 +138,10 @@ start_stream = function()
     end,
     on_sample = function(sample)
       state.last_event_ms = sample.received_at or now_ms()
-      if state.renderer then state.renderer:apply_sample(sample) end
+      if state.renderer then
+        sample.page = state.pager:accept_remote(sample.page, #state.renderer.pages)
+        state.renderer:apply_sample(sample)
+      end
       set_status("LIVE", "page " .. tostring(state.renderer and state.renderer.active_page or 1))
     end,
     on_control = function(control)
@@ -190,6 +195,8 @@ fetch_layout = function(reason)
     end
     state.renderer = renderer
     state.layout = model
+    local restored_page = state.pager:restore(model.page_count)
+    if restored_page then renderer:set_page(restored_page) end
     set_status("READY", tostring(model.page_count) .. " page(s), " .. tostring(model.item_count) .. " item(s)")
     start_stream()
   end)
@@ -197,6 +204,7 @@ end
 
 function state.snapshot()
   local render = state.renderer and state.renderer:snapshot() or {}
+  local pager = state.pager:snapshot()
   return {
     status = state.status,
     detail = state.detail,
@@ -227,7 +235,19 @@ function state.snapshot()
     antialiasing = render.antialiasing or "firmware",
     surface_bytes = render.surface_bytes or 0,
     surface_flushes = render.surface_flushes or 0,
+    page_source = pager.source,
+    tilt_page_cooldown_ms = pager.cooldown_ms,
   }
+end
+
+function state.turn_page(direction)
+  if state.stopped or not state.renderer then return false, "renderer unavailable" end
+  local page, changed = state.pager:step(state.renderer.active_page,
+    #state.renderer.pages, direction, now_ms())
+  if not changed then return false, "cooldown or single page" end
+  state.renderer:set_page(page)
+  set_status("LIVE", "page " .. tostring(page) .. " · tilt")
+  return true, page
 end
 
 function state.restart_client()
@@ -253,13 +273,22 @@ function state.stop()
   if key and key.off then key.off() end
 end
 
-if key and key.on and key.HOME then
-  key.on(key.HOME, function(event)
-    if event == key.SHORT then
-      state.stop()
-      if app and app.exit then app.exit() end
-    end
-  end)
+if key and key.on then
+  local function tilt(direction, event)
+    -- START is emitted once when the gravity threshold is crossed. SHORT is
+    -- the release half of the same gesture; consuming both would double-page.
+    if event == key.START then state.turn_page(direction) end
+  end
+  if key.LEFT then key.on(key.LEFT, function(event) tilt(-1, event) end) end
+  if key.RIGHT then key.on(key.RIGHT, function(event) tilt(1, event) end) end
+  if key.HOME then
+    key.on(key.HOME, function(event)
+      if event == key.SHORT then
+        state.stop()
+        if app and app.exit then app.exit() end
+      end
+    end)
+  end
 end
 
 _G.__aida_monitor = state
