@@ -15,7 +15,14 @@ local function align_value(value)
   return 0
 end
 
-local function render_options(text_style, opaque)
+local function subpixel_value(order)
+  order = tostring(order or "off"):lower()
+  if order == "rgb" then return 1 end
+  if order == "bgr" then return 2 end
+  return 0
+end
+
+local function render_options(text_style, opaque, subpixel_order)
   text_style = text_style or {}
   local font = text_style.font or {}
   local shadow = text_style.shadow or {}
@@ -31,6 +38,7 @@ local function render_options(text_style, opaque)
     shadow_blur = clamp(shadow.blur or 0, 0, 2),
     shadow_color = tonumber(shadow.color) or 0,
     shadow_opacity = shadow.color and clamp(shadow.opacity or 192, 0, 255) or 0,
+    subpixel = subpixel_value(subpixel_order),
   }
 end
 
@@ -40,6 +48,7 @@ function VectorFont.new(config)
     family = tostring(config.vector_font_family or "AIDA Noto Sans SC"),
     module_path = tostring(config.vector_font_module or "/sd/apps/aida_monitor/modules/aida_font.so"),
     font_path = tostring(config.vector_font_path or "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"),
+    subpixel_order = tostring(config.font_subpixel or "rgb"):lower(),
     module = nil,
     ready = false,
     surface_ready = false,
@@ -66,6 +75,8 @@ function VectorFont.new(config)
   self.surface_ready = type(module_or_error.surface_create) == "function"
     and type(module_or_error.surface_free) == "function"
     and type(module_or_error.surface_clear) == "function"
+    and type(module_or_error.surface_copy) == "function"
+    and type(module_or_error.surface_image) == "function"
     and type(module_or_error.surface_rect) == "function"
     and type(module_or_error.surface_circle) == "function"
     and type(module_or_error.surface_line) == "function"
@@ -79,7 +90,7 @@ function VectorFont:render(text, width, height, text_style, background, chroma, 
   if not self.ready or not self.module then return nil, self.error end
   text_style = text_style or {}
   local font = text_style.font or {}
-  local options = render_options(text_style, opaque)
+  local options = render_options(text_style, opaque, self.subpixel_order)
   local ok, data, render_error = pcall(self.module.render,
     tostring(text or ""), math.floor(width), math.floor(height),
     clamp(font.size or 12, 6, 96), tonumber(text_style.color) or 0xFFFFFF,
@@ -101,7 +112,7 @@ function VectorFont:measure(text, text_style)
   text_style = text_style or {}
   local font = text_style.font or {}
   local ok, width = pcall(self.module.measure, tostring(text or ""),
-    clamp(font.size or 12, 6, 96), render_options(text_style, false))
+    clamp(font.size or 12, 6, 96), render_options(text_style, false, self.subpixel_order))
   if not ok or type(width) ~= "number" then return nil end
   return math.max(0, math.floor(width + 0.5))
 end
@@ -128,6 +139,21 @@ function VectorFont:surface_clear(id, color)
   return true
 end
 
+function VectorFont:surface_copy(destination, source)
+  local ok, result, err = pcall(self.module.surface_copy, destination, source)
+  if not ok or result == false or result == nil then return false, tostring(err or result) end
+  return true
+end
+
+function VectorFont:surface_image(id, data, x, y, width, height, fit)
+  local fit_value = ({ stretch = 0, contain = 1, cover = 2 })[tostring(fit or "stretch"):lower()] or 0
+  local ok, result, err = pcall(self.module.surface_image, id, data,
+    math.floor(x or 0), math.floor(y or 0), math.max(1, math.floor(width or 1)),
+    math.max(1, math.floor(height or 1)), fit_value)
+  if not ok or result == false or result == nil then return false, tostring(err or result) end
+  return true
+end
+
 function VectorFont:surface_rect(id, x, y, width, height, color, opacity)
   local ok, result, err = pcall(self.module.surface_rect, id, math.floor(x), math.floor(y),
     math.floor(width), math.floor(height), tonumber(color) or 0, clamp(opacity or 255, 0, 255))
@@ -137,7 +163,7 @@ end
 
 function VectorFont:surface_circle(id, cx, cy, radius, color, opacity)
   local ok, result, err = pcall(self.module.surface_circle, id,
-    math.floor(cx + 0.5), math.floor(cy + 0.5), math.max(0, math.floor(radius + 0.5)),
+    tonumber(cx) or 0, tonumber(cy) or 0, math.max(0, tonumber(radius) or 0),
     tonumber(color) or 0, clamp(opacity or 255, 0, 255))
   if not ok or result == false or result == nil then return false, tostring(err or result) end
   return true
@@ -145,8 +171,8 @@ end
 
 function VectorFont:surface_line(id, x1, y1, x2, y2, color, opacity, width)
   local ok, result, err = pcall(self.module.surface_line, id,
-    math.floor(x1 + 0.5), math.floor(y1 + 0.5),
-    math.floor(x2 + 0.5), math.floor(y2 + 0.5),
+    tonumber(x1) or 0, tonumber(y1) or 0,
+    tonumber(x2) or 0, tonumber(y2) or 0,
     tonumber(color) or 0, clamp(opacity or 255, 0, 255), math.max(1, math.floor(width or 1)))
   if not ok or result == false or result == nil then return false, tostring(err or result) end
   return true
@@ -167,7 +193,8 @@ function VectorFont:surface_text(id, x, y, width, height, text, text_style)
   local ok, result, err = pcall(self.module.surface_text, id,
     math.floor(x), math.floor(y), math.max(1, math.floor(width)), math.max(1, math.floor(height)),
     tostring(text or ""), clamp(font.size or 12, 6, 96),
-    tonumber(text_style.color) or 0xFFFFFF, render_options(text_style, false))
+    tonumber(text_style.color) or 0xFFFFFF,
+    render_options(text_style, false, self.subpixel_order))
   if not ok or result == false or result == nil then return false, tostring(err or result) end
   return true
 end
@@ -188,6 +215,7 @@ function VectorFont:stats()
     engine = self.ready and "stb_truetype" or "firmware fallback",
     loaded = self.ready,
     surface_ready = self.surface_ready,
+    subpixel = self.subpixel_order,
     error = self.error,
   }
   if self.ready and self.module and type(self.module.stats) == "function" then

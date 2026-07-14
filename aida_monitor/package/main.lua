@@ -221,6 +221,10 @@ function state.snapshot()
     psram_free = render.psram_free or 0,
     psram_largest = render.psram_largest or 0,
     compositor = render.compositor or "legacy-canvas",
+    background_ready = render.background_ready == true,
+    layer_model = render.layer_model or "legacy-dom",
+    subpixel = render.subpixel or tostring(config.font_subpixel or "off"),
+    antialiasing = render.antialiasing or "firmware",
     surface_bytes = render.surface_bytes or 0,
     surface_flushes = render.surface_flushes or 0,
   }
@@ -229,6 +233,9 @@ end
 function state.restart_client()
   if state.stopped then return false, "stopped" end
   if state.client then state.client:stop() state.client = nil end
+  if state.vector_font then
+    state.vector_font.subpixel_order = tostring(config.font_subpixel or "rgb"):lower()
+  end
   stop_timer("retry_timer")
   stop_timer("reload_timer")
   fetch_layout("configuration")

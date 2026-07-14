@@ -175,6 +175,44 @@ local function style_geometry(style)
   }
 end
 
+local function style_visible(style)
+  local visibility = tostring(style and style.visibility or ""):lower()
+  local display = tostring(style and style.display or ""):lower()
+  return visibility ~= "hidden" and display ~= "none"
+end
+
+local function css_url(value)
+  local raw = trim(tostring(value or ""):match("url%s*%((.-)%)") or "")
+  if raw == "" or raw:lower() == "none" then return nil end
+  if (raw:sub(1, 1) == '"' and raw:sub(-1) == '"')
+    or (raw:sub(1, 1) == "'" and raw:sub(-1) == "'") then
+    raw = raw:sub(2, -2)
+  end
+  return html_decode(raw)
+end
+
+local function parse_background_image(html)
+  local style_block = tostring(html or ""):match("<style[^>]*>(.-)</style>") or ""
+  local body_css = style_block:match("body%s*{(.-)}") or ""
+  local body_style = tostring(html or ""):match('<body[^>]-style="([^"]*)"') or ""
+  local body_tag = tostring(html or ""):match("<body[^>]*>") or ""
+  local src = css_url((parse_style(body_style)["background-image"]))
+    or css_url((parse_style(body_css)["background-image"]))
+    or html_decode(body_tag:match('background="([^"]+)"') or "")
+  if src == "" then return nil end
+  if not src then return nil end
+  return {
+    id = "BackgroundImage",
+    kind = "image",
+    src = src,
+    is_background = true,
+    fit = "stretch",
+    geometry = { x = 0, y = 0, w = 320, h = 240 },
+    order = 0,
+    z_index = -2147483647,
+  }
+end
+
 local function text_fields(style, text)
   local font = font_from_style(style)
   local decoration = tostring(style and style["text-decoration"] or ""):lower()
@@ -223,6 +261,8 @@ local function parse_label(model, page_index, line)
     style = style,
     geometry = style_geometry(style),
     text_style = text_fields(style, text),
+    visible = style_visible(style),
+    z_index = css_number(style, "z-index", nil),
   }
   add_item(model, page_index, item)
   return true
@@ -243,6 +283,8 @@ local function parse_simple(model, page_index, line)
       style = merged,
       geometry = style_geometry(outer),
       text_style = text_fields(merged, text),
+      visible = style_visible(merged),
+      z_index = css_number(merged, "z-index", nil),
     })
     return true
   end
@@ -259,6 +301,8 @@ local function parse_simple(model, page_index, line)
     style = style,
     geometry = style_geometry(style),
     text_style = text_fields(style, text),
+    visible = style_visible(style),
+    z_index = css_number(style, "z-index", nil),
   })
   return true
 end
@@ -274,6 +318,8 @@ local function parse_sensor(model, page_index, line)
     kind = "sensor",
     style = outer,
     geometry = style_geometry(outer),
+    visible = style_visible(outer),
+    z_index = css_number(outer, "z-index", nil),
   }
 
   -- AIDA64 emits both a flat SensorItem and a nested table-cell variant when
@@ -317,6 +363,12 @@ local function parse_sensor(model, page_index, line)
       background = parse_gradient(bg_style.background, 0x202020),
       foreground = parse_gradient(fg_style.background, 0x00AA00),
       margin_top = css_number(bg_style, "margin-top", 0),
+      border_width = math.max(0, math.floor(css_number(bg_style, "border", 0) + 0.5)),
+      border_color = css_color(bg_style.border, 0),
+      orientation = (css_number(bg_style, "height", 0) > css_number(bg_style, "width", 0))
+        and "vertical" or "horizontal",
+      reverse = tostring(fg_style.float or ""):lower() == "right"
+        or fg_style.bottom == "0" or fg_style.bottom == "0px",
     }
   end
 
@@ -347,6 +399,8 @@ local function parse_canvas(model, page_index, line)
     style = style,
     geometry = geometry,
     history = {},
+    visible = style_visible(style),
+    z_index = css_number(style, "z-index", nil),
   })
   return true
 end
@@ -376,6 +430,9 @@ local function parse_image(model, page_index, line)
     src = html_decode(src),
     style = style,
     geometry = item_geometry,
+    visible = style_visible(style),
+    z_index = css_number(style, "z-index", nil),
+    fit = (tonumber(width) or tonumber(height)) and "stretch" or "native",
   })
   return true
 end
@@ -466,6 +523,12 @@ function Layout.parse(html)
     image_count = 0,
     active_page = 1,
   }
+  model.background_image = parse_background_image(html)
+  if model.background_image then
+    model.image_count = 1
+    model.item_count = 1
+    model.counts.image = 1
+  end
   local page_index = 1
   ensure_page(model, page_index)
 
@@ -486,6 +549,18 @@ function Layout.parse(html)
   for line in html:gmatch("[^\r\n]+") do
     parse_graph_call(model, line)
     parse_arc_call(model, line)
+  end
+
+  -- AIDA normally relies on DOM order, but also permits explicit CSS z-index.
+  -- Preserve source order inside each z-plane and keep the body background in
+  -- its own compositor layer below every page item.
+  for _, page in ipairs(model.pages) do
+    table.sort(page.items, function(left, right)
+      local left_z = tonumber(left.z_index) or 0
+      local right_z = tonumber(right.z_index) or 0
+      if left_z == right_z then return (left.order or 0) < (right.order or 0) end
+      return left_z < right_z
+    end)
   end
 
   model.page_count = #model.pages

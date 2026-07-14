@@ -8,6 +8,11 @@
 typedef struct font_instance_t font_instance_t;
 static void *font_stb_alloc(size_t size, void *userdata);
 static void font_stb_free(void *ptr, void *userdata);
+static void *font_alloc(font_instance_t *inst, size_t size);
+static void font_release(font_instance_t *inst, void *ptr);
+static void *image_stb_alloc(size_t size);
+static void *image_stb_realloc(void *ptr, size_t old_size, size_t new_size);
+static void image_stb_free(void *ptr);
 
 #define STBTT_STATIC
 #define STBTT_assert(value) ((void)0)
@@ -16,8 +21,21 @@ static void font_stb_free(void *ptr, void *userdata);
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
+#define STBI_NO_STDIO
+#define STBI_NO_SIMD
+#define STBI_MAX_DIMENSIONS 2048
+#define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_GIF
+#define STBI_ONLY_BMP
+#define STBI_MALLOC(size) image_stb_alloc((size))
+#define STBI_REALLOC_SIZED(ptr, old_size, new_size) image_stb_realloc((ptr), (old_size), (new_size))
+#define STBI_FREE(ptr) image_stb_free((ptr))
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #define FONT_MODULE_EXPORT __attribute__((visibility("default"), used))
-#define FONT_VERSION "0.3.0"
+#define FONT_VERSION "0.4.0"
 #define FONT_CACHE_SLOTS 96u
 #define FONT_CACHE_LIMIT (512u * 1024u)
 #define FONT_MAX_FILE_BYTES (4u * 1024u * 1024u)
@@ -25,6 +43,8 @@ static void font_stb_free(void *ptr, void *userdata);
 #define FONT_MAX_WIDTH 320
 #define FONT_MAX_HEIGHT 240
 #define FONT_SURFACE_SLOTS 2u
+#define FONT_MAX_IMAGE_BYTES (2u * 1024u * 1024u)
+#define FONT_MAX_IMAGE_PIXELS 307200u
 
 typedef struct cached_glyph_t {
     uint32_t codepoint;
@@ -72,6 +92,7 @@ struct font_instance_t {
 };
 
 static const module_host_api_v1 *s_host = NULL;
+static font_instance_t *s_image_instance = NULL;
 
 static const module_manifest_t s_manifest = {
     MODULE_MANIFEST_MAGIC,
@@ -115,6 +136,38 @@ static void font_release(font_instance_t *inst, void *ptr)
     if (inst && ptr && inst->host.heap.free) {
         inst->host.heap.free(ptr);
     }
+}
+
+static void *image_stb_alloc(size_t size)
+{
+    return font_alloc(s_image_instance, size);
+}
+
+static void *image_stb_realloc(void *ptr, size_t old_size, size_t new_size)
+{
+    void *replacement = NULL;
+    size_t copy_size = old_size < new_size ? old_size : new_size;
+    if (!ptr) {
+        return image_stb_alloc(new_size);
+    }
+    if (new_size == 0) {
+        image_stb_free(ptr);
+        return NULL;
+    }
+    replacement = image_stb_alloc(new_size);
+    if (!replacement) {
+        return NULL;
+    }
+    if (copy_size > 0) {
+        memcpy(replacement, ptr, copy_size);
+    }
+    image_stb_free(ptr);
+    return replacement;
+}
+
+static void image_stb_free(void *ptr)
+{
+    font_release(s_image_instance, ptr);
 }
 
 static void *font_stb_alloc(size_t size, void *userdata)
@@ -647,23 +700,6 @@ static void surface_pixel(software_surface_t *surface,
     }
 }
 
-static void surface_brush(software_surface_t *surface,
-                          int x,
-                          int y,
-                          int width,
-                          uint32_t color,
-                          int opacity)
-{
-    int radius = width > 1 ? width / 2 : 0;
-    int py = 0;
-    int px = 0;
-    for (py = y - radius; py <= y + radius; ++py) {
-        for (px = x - radius; px <= x + radius; ++px) {
-            surface_pixel(surface, px, py, color, opacity);
-        }
-    }
-}
-
 static int l_surface_create(lua_State *L)
 {
     font_instance_t *inst = instance_from_lua(L);
@@ -737,6 +773,135 @@ static int l_surface_clear(lua_State *L)
     return 1;
 }
 
+static int l_surface_copy(lua_State *L)
+{
+    font_instance_t *inst = instance_from_lua(L);
+    software_surface_t *destination = NULL;
+    software_surface_t *source = NULL;
+    if (!inst) return 0;
+    destination = surface_get(inst, (int)inst->host.lua.checkinteger(L, 1));
+    source = surface_get(inst, (int)inst->host.lua.checkinteger(L, 2));
+    if (!destination || !source) return push_error(L, &inst->host, "surface is invalid");
+    if (destination->width != source->width || destination->height != source->height) {
+        return push_error(L, &inst->host, "surface dimensions do not match");
+    }
+    memcpy(destination->pixels, source->pixels, destination->bytes);
+    inst->host.lua.pushboolean(L, 1);
+    return 1;
+}
+
+static int l_surface_image(lua_State *L)
+{
+    font_instance_t *inst = instance_from_lua(L);
+    software_surface_t *surface = NULL;
+    const unsigned char *encoded = NULL;
+    unsigned char *decoded = NULL;
+    size_t encoded_size = 0;
+    int image_width = 0, image_height = 0, channels = 0;
+    int x = 0, y = 0, width = 0, height = 0, fit = 0;
+    float target_x = 0.0f, target_y = 0.0f, target_width = 0.0f, target_height = 0.0f;
+    int min_x = 0, max_x = 0, min_y = 0, max_y = 0;
+    int px = 0, py = 0;
+    if (!inst) return 0;
+    surface = surface_get(inst, (int)inst->host.lua.checkinteger(L, 1));
+    encoded = (const unsigned char *)inst->host.lua.checklstring(L, 2, &encoded_size);
+    x = (int)inst->host.lua.checkinteger(L, 3);
+    y = (int)inst->host.lua.checkinteger(L, 4);
+    width = (int)inst->host.lua.checkinteger(L, 5);
+    height = (int)inst->host.lua.checkinteger(L, 6);
+    fit = (int)inst->host.lua.checkinteger(L, 7);
+    if (!surface || !encoded || encoded_size == 0 || encoded_size > FONT_MAX_IMAGE_BYTES
+        || width < 1 || height < 1) {
+        return push_error(L, &inst->host, "surface image arguments are invalid");
+    }
+    s_image_instance = inst;
+    if (!stbi_info_from_memory(encoded, (int)encoded_size,
+                               &image_width, &image_height, &channels)
+        || image_width < 1 || image_height < 1
+        || (size_t)image_width * (size_t)image_height > FONT_MAX_IMAGE_PIXELS) {
+        s_image_instance = NULL;
+        return push_error(L, &inst->host, "image format or dimensions are unsupported");
+    }
+    decoded = stbi_load_from_memory(encoded, (int)encoded_size,
+                                    &image_width, &image_height, &channels, 4);
+    if (!decoded) {
+        s_image_instance = NULL;
+        return push_error(L, &inst->host, "image decode failed");
+    }
+
+    target_x = (float)x;
+    target_y = (float)y;
+    target_width = (float)width;
+    target_height = (float)height;
+    if (fit == 1 || fit == 2) {
+        float sx = (float)width / (float)image_width;
+        float sy = (float)height / (float)image_height;
+        float scale = fit == 1 ? (sx < sy ? sx : sy) : (sx > sy ? sx : sy);
+        target_width = (float)image_width * scale;
+        target_height = (float)image_height * scale;
+        target_x = (float)x + ((float)width - target_width) * 0.5f;
+        target_y = (float)y + ((float)height - target_height) * 0.5f;
+    }
+    min_x = fit == 1 ? (int)floorf(target_x) : x;
+    min_y = fit == 1 ? (int)floorf(target_y) : y;
+    max_x = fit == 1 ? (int)ceilf(target_x + target_width) : x + width;
+    max_y = fit == 1 ? (int)ceilf(target_y + target_height) : y + height;
+    if (min_x < 0) min_x = 0;
+    if (min_y < 0) min_y = 0;
+    if (max_x > surface->width) max_x = surface->width;
+    if (max_y > surface->height) max_y = surface->height;
+
+    for (py = min_y; py < max_y; ++py) {
+        float source_y = (((float)py + 0.5f - target_y) * (float)image_height
+                          / target_height) - 0.5f;
+        int y0 = (int)floorf(source_y);
+        int y1 = y0 + 1;
+        float fy = source_y - floorf(source_y);
+        if (y0 < 0) y0 = 0;
+        if (y1 >= image_height) y1 = image_height - 1;
+        for (px = min_x; px < max_x; ++px) {
+            float source_x = (((float)px + 0.5f - target_x) * (float)image_width
+                              / target_width) - 0.5f;
+            int x0 = (int)floorf(source_x);
+            int x1 = x0 + 1;
+            float fx = source_x - floorf(source_x);
+            float weights[4] = { (1.0f - fx) * (1.0f - fy), fx * (1.0f - fy),
+                                 (1.0f - fx) * fy, fx * fy };
+            int sample_x[4], sample_y[4], sample = 0;
+            float alpha = 0.0f, red = 0.0f, green = 0.0f, blue = 0.0f;
+            uint32_t color = 0;
+            int opacity = 0;
+            if (x0 < 0) x0 = 0;
+            if (x1 >= image_width) x1 = image_width - 1;
+            sample_x[0] = x0; sample_y[0] = y0;
+            sample_x[1] = x1; sample_y[1] = y0;
+            sample_x[2] = x0; sample_y[2] = y1;
+            sample_x[3] = x1; sample_y[3] = y1;
+            for (sample = 0; sample < 4; ++sample) {
+                const unsigned char *rgba = &decoded[((size_t)sample_y[sample]
+                    * (size_t)image_width + (size_t)sample_x[sample]) * 4u];
+                float weighted_alpha = weights[sample] * (float)rgba[3];
+                alpha += weighted_alpha;
+                red += weighted_alpha * (float)rgba[0];
+                green += weighted_alpha * (float)rgba[1];
+                blue += weighted_alpha * (float)rgba[2];
+            }
+            opacity = (int)floorf(alpha + 0.5f);
+            if (opacity > 0) {
+                color = ((uint32_t)(red / alpha + 0.5f) << 16)
+                      | ((uint32_t)(green / alpha + 0.5f) << 8)
+                      | (uint32_t)(blue / alpha + 0.5f);
+                surface_pixel(surface, px, py, color, opacity);
+            }
+        }
+        if ((py & 15) == 0 && inst->host.time.yield) inst->host.time.yield();
+    }
+    stbi_image_free(decoded);
+    s_image_instance = NULL;
+    inst->host.lua.pushboolean(L, 1);
+    return 1;
+}
+
 static int l_surface_rect(lua_State *L)
 {
     font_instance_t *inst = instance_from_lua(L);
@@ -766,22 +931,33 @@ static int l_surface_circle(lua_State *L)
 {
     font_instance_t *inst = instance_from_lua(L);
     software_surface_t *surface = NULL;
-    int cx = 0, cy = 0, radius = 0, opacity = 255;
+    float cx = 0.0f, cy = 0.0f, radius = 0.0f;
+    int opacity = 255;
     uint32_t color = 0;
-    int row = 0, column = 0;
+    int min_x = 0, max_x = 0, min_y = 0, max_y = 0;
+    int px = 0, py = 0;
     if (!inst) return 0;
     surface = surface_get(inst, (int)inst->host.lua.checkinteger(L, 1));
-    cx = (int)inst->host.lua.checkinteger(L, 2);
-    cy = (int)inst->host.lua.checkinteger(L, 3);
-    radius = (int)inst->host.lua.checkinteger(L, 4);
+    cx = (float)inst->host.lua.checknumber(L, 2);
+    cy = (float)inst->host.lua.checknumber(L, 3);
+    radius = (float)inst->host.lua.checknumber(L, 4);
     color = (uint32_t)inst->host.lua.checkinteger(L, 5);
     opacity = (int)inst->host.lua.checkinteger(L, 6);
     if (!surface) return push_error(L, &inst->host, "surface is invalid");
-    if (radius < 0) radius = 0;
-    for (row = -radius; row <= radius; ++row) {
-        int half = (int)floorf(sqrtf((float)(radius * radius - row * row)) + 0.5f);
-        for (column = -half; column <= half; ++column) {
-            surface_pixel(surface, cx + column, cy + row, color, opacity);
+    if (radius < 0.0f) radius = 0.0f;
+    min_x = (int)floorf(cx - radius - 1.0f);
+    max_x = (int)ceilf(cx + radius + 1.0f);
+    min_y = (int)floorf(cy - radius - 1.0f);
+    max_y = (int)ceilf(cy + radius + 1.0f);
+    for (py = min_y; py <= max_y; ++py) {
+        for (px = min_x; px <= max_x; ++px) {
+            float dx = ((float)px + 0.5f) - cx;
+            float dy = ((float)py + 0.5f) - cy;
+            float coverage = radius + 0.5f - sqrtf(dx * dx + dy * dy);
+            if (coverage <= 0.0f) continue;
+            if (coverage > 1.0f) coverage = 1.0f;
+            surface_pixel(surface, px, py, color,
+                          (int)floorf((float)opacity * coverage + 0.5f));
         }
     }
     inst->host.lua.pushboolean(L, 1);
@@ -792,31 +968,50 @@ static int l_surface_line(lua_State *L)
 {
     font_instance_t *inst = instance_from_lua(L);
     software_surface_t *surface = NULL;
-    int x0 = 0, y0 = 0, x1 = 0, y1 = 0, opacity = 255, width = 1;
-    int dx = 0, sx = 0, dy = 0, sy = 0, error = 0, twice = 0;
+    float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
+    int opacity = 255, width = 1;
+    float vx = 0.0f, vy = 0.0f, length_squared = 0.0f, half_width = 0.5f;
+    int min_x = 0, max_x = 0, min_y = 0, max_y = 0, px = 0, py = 0;
     uint32_t color = 0;
     if (!inst) return 0;
     surface = surface_get(inst, (int)inst->host.lua.checkinteger(L, 1));
-    x0 = (int)inst->host.lua.checkinteger(L, 2);
-    y0 = (int)inst->host.lua.checkinteger(L, 3);
-    x1 = (int)inst->host.lua.checkinteger(L, 4);
-    y1 = (int)inst->host.lua.checkinteger(L, 5);
+    x0 = (float)inst->host.lua.checknumber(L, 2);
+    y0 = (float)inst->host.lua.checknumber(L, 3);
+    x1 = (float)inst->host.lua.checknumber(L, 4);
+    y1 = (float)inst->host.lua.checknumber(L, 5);
     color = (uint32_t)inst->host.lua.checkinteger(L, 6);
     opacity = (int)inst->host.lua.checkinteger(L, 7);
     width = (int)inst->host.lua.checkinteger(L, 8);
     if (!surface) return push_error(L, &inst->host, "surface is invalid");
     if (width < 1) width = 1;
-    dx = x1 > x0 ? x1 - x0 : x0 - x1;
-    sx = x0 < x1 ? 1 : -1;
-    dy = -(y1 > y0 ? y1 - y0 : y0 - y1);
-    sy = y0 < y1 ? 1 : -1;
-    error = dx + dy;
-    for (;;) {
-        surface_brush(surface, x0, y0, width, color, opacity);
-        if (x0 == x1 && y0 == y1) break;
-        twice = error * 2;
-        if (twice >= dy) { error += dy; x0 += sx; }
-        if (twice <= dx) { error += dx; y0 += sy; }
+    half_width = (float)width * 0.5f;
+    vx = x1 - x0;
+    vy = y1 - y0;
+    length_squared = vx * vx + vy * vy;
+    min_x = (int)floorf((x0 < x1 ? x0 : x1) - half_width - 1.0f);
+    max_x = (int)ceilf((x0 > x1 ? x0 : x1) + half_width + 1.0f);
+    min_y = (int)floorf((y0 < y1 ? y0 : y1) - half_width - 1.0f);
+    max_y = (int)ceilf((y0 > y1 ? y0 : y1) + half_width + 1.0f);
+    for (py = min_y; py <= max_y; ++py) {
+        for (px = min_x; px <= max_x; ++px) {
+            float sample_x = (float)px + 0.5f;
+            float sample_y = (float)py + 0.5f;
+            float t = length_squared > 0.0f
+                ? ((sample_x - x0) * vx + (sample_y - y0) * vy) / length_squared : 0.0f;
+            float nearest_x = 0.0f, nearest_y = 0.0f, dx = 0.0f, dy = 0.0f;
+            float coverage = 0.0f;
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            nearest_x = x0 + t * vx;
+            nearest_y = y0 + t * vy;
+            dx = sample_x - nearest_x;
+            dy = sample_y - nearest_y;
+            coverage = half_width + 0.5f - sqrtf(dx * dx + dy * dy);
+            if (coverage <= 0.0f) continue;
+            if (coverage > 1.0f) coverage = 1.0f;
+            surface_pixel(surface, px, py, color,
+                          (int)floorf((float)opacity * coverage + 0.5f));
+        }
     }
     inst->host.lua.pushboolean(L, 1);
     return 1;
@@ -898,6 +1093,7 @@ static int l_surface_text(lua_State *L)
     int x = 0, y = 0, width = 0, height = 0, size_px = 0;
     uint32_t foreground = 0;
     int bold = 0, italic = 0, underline = 0, strike = 0, align = 0;
+    int subpixel = 0;
     int shadow_dx = 0, shadow_dy = 0, shadow_blur = 0, shadow_opacity = 0;
     uint32_t shadow_color = 0;
     int ascent = 0, descent = 0, line_gap = 0;
@@ -933,6 +1129,8 @@ static int l_surface_text(lua_State *L)
     shadow_blur = option_integer(L, &inst->host, 9, "shadow_blur", 0);
     shadow_opacity = option_integer(L, &inst->host, 9, "shadow_opacity", 0);
     shadow_color = (uint32_t)option_integer(L, &inst->host, 9, "shadow_color", 0);
+    subpixel = option_integer(L, &inst->host, 9, "subpixel", 0);
+    if (subpixel < 0 || subpixel > 2) subpixel = 0;
     if (shadow_blur < 0) shadow_blur = 0;
     if (shadow_blur > 2) shadow_blur = 2;
     if (shadow_opacity < 0) shadow_opacity = 0;
@@ -976,17 +1174,49 @@ static int l_surface_text(lua_State *L)
         int dx = x + column;
         int dy = y + row;
         uint16_t *target = NULL;
-        uint32_t inverse = 0, br = 0, bg = 0, bb = 0;
-        if (!source->a || dx < 0 || dy < 0
-            || dx >= destination->width || dy >= destination->height) continue;
+        uint32_t br = 0, bg = 0, bb = 0;
+        if (dx < 0 || dy < 0 || dx >= destination->width || dy >= destination->height) continue;
+        if (!source->a && subpixel == 0) continue;
         target = &destination->pixels[(size_t)dy * destination->width + (size_t)dx];
-        inverse = 255u - source->a;
         br = ((*target >> 11) & 0x1Fu) * 255u / 31u;
         bg = ((*target >> 5) & 0x3Fu) * 255u / 63u;
         bb = (*target & 0x1Fu) * 255u / 31u;
-        *target = rgb565((uint8_t)((uint32_t)source->r + (br * inverse + 127u) / 255u),
-                         (uint8_t)((uint32_t)source->g + (bg * inverse + 127u) / 255u),
-                         (uint8_t)((uint32_t)source->b + (bb * inverse + 127u) / 255u));
+        if (subpixel == 0) {
+            uint32_t inverse = 255u - source->a;
+            *target = rgb565((uint8_t)((uint32_t)source->r + (br * inverse + 127u) / 255u),
+                             (uint8_t)((uint32_t)source->g + (bg * inverse + 127u) / 255u),
+                             (uint8_t)((uint32_t)source->b + (bb * inverse + 127u) / 255u));
+        } else {
+            uint32_t left_alpha = column > 0 ? layer[index - 1].a : 0;
+            uint32_t center_alpha = source->a;
+            uint32_t right_alpha = column + 1 < width ? layer[index + 1].a : 0;
+            uint32_t red_alpha = (5u * center_alpha + left_alpha + 3u) / 6u;
+            uint32_t green_alpha = center_alpha;
+            uint32_t blue_alpha = (5u * center_alpha + right_alpha + 3u) / 6u;
+            premul_pixel_t *color_source = source;
+            uint32_t source_red = 0, source_green = 0, source_blue = 0;
+            if (subpixel == 2) {
+                uint32_t swap = red_alpha;
+                red_alpha = blue_alpha;
+                blue_alpha = swap;
+            }
+            if (!color_source->a && left_alpha >= right_alpha && column > 0) {
+                color_source = &layer[index - 1];
+            } else if (!color_source->a && column + 1 < width) {
+                color_source = &layer[index + 1];
+            }
+            if (!color_source->a || !(red_alpha || green_alpha || blue_alpha)) continue;
+            source_red = ((uint32_t)color_source->r * 255u + color_source->a / 2u)
+                / color_source->a;
+            source_green = ((uint32_t)color_source->g * 255u + color_source->a / 2u)
+                / color_source->a;
+            source_blue = ((uint32_t)color_source->b * 255u + color_source->a / 2u)
+                / color_source->a;
+            *target = rgb565(
+                (uint8_t)((source_red * red_alpha + br * (255u - red_alpha) + 127u) / 255u),
+                (uint8_t)((source_green * green_alpha + bg * (255u - green_alpha) + 127u) / 255u),
+                (uint8_t)((source_blue * blue_alpha + bb * (255u - blue_alpha) + 127u) / 255u));
+        }
     }
     font_release(inst, layer);
     inst->render_count++;
@@ -1281,6 +1511,10 @@ static int l_font_stats(lua_State *L)
     inst->host.lua.newtable(L);
     inst->host.lua.pushstring(L, "stb_truetype");
     inst->host.lua.setfield(L, -2, "engine");
+    inst->host.lua.pushstring(L, "coverage-aa");
+    inst->host.lua.setfield(L, -2, "antialiasing");
+    inst->host.lua.pushstring(L, "off/rgb/bgr");
+    inst->host.lua.setfield(L, -2, "subpixel_modes");
     inst->host.lua.pushstring(L, FONT_VERSION);
     inst->host.lua.setfield(L, -2, "version");
     inst->host.lua.pushboolean(L, inst->loaded ? 1 : 0);
@@ -1366,6 +1600,8 @@ FONT_MODULE_EXPORT int32_t module_luaopen_v1(void *instance, lua_State *L)
     set_function_field(L, host, "surface_create", l_surface_create, inst);
     set_function_field(L, host, "surface_free", l_surface_free, inst);
     set_function_field(L, host, "surface_clear", l_surface_clear, inst);
+    set_function_field(L, host, "surface_copy", l_surface_copy, inst);
+    set_function_field(L, host, "surface_image", l_surface_image, inst);
     set_function_field(L, host, "surface_rect", l_surface_rect, inst);
     set_function_field(L, host, "surface_circle", l_surface_circle, inst);
     set_function_field(L, host, "surface_line", l_surface_line, inst);

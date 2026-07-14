@@ -157,25 +157,32 @@ local function parse_remote_payload(payload)
           if id:match("^SIV%d+$") or id:match("^Simple%d+$") then
             sample.updates[#sample.updates + 1] = {
               id = id, kind = "text", text = html_decode(fields[2] or ""),
+              visible = (fields[2] or "") ~= "",
             }
           elseif id:match("^Bar%d+p$") then
             sample.updates[#sample.updates + 1] = {
               id = id,
               kind = "bar",
               percent = tonumber(fields[2]) or 0,
+              visible = (fields[2] or "") ~= "",
               background = gradient_value(fields[3], 0x202020),
               foreground = gradient_value(fields[4], 0x00FF00),
             }
           elseif id:match("^Gph%d+p$") then
-            sample.updates[#sample.updates + 1] = {
-              id = id, kind = "graph", value = tonumber(fields[2]) or first_number(fields[2]) or 0,
-            }
+            if (fields[2] or "") == "" then
+              sample.updates[#sample.updates + 1] = { id = id, kind = "graph_clear" }
+            else
+              sample.updates[#sample.updates + 1] = {
+                id = id, kind = "graph", value = tonumber(fields[2]) or first_number(fields[2]) or 0,
+              }
+            end
           elseif id:match("^Arc%d+p$") then
             sample.updates[#sample.updates + 1] = {
               id = id,
               kind = "arc",
               percent = tonumber(fields[2]) or 0,
               text = html_decode(fields[3] or ""),
+              visible = (fields[3] or "") ~= "",
               background_color = color_value(fields[4], 0x202020),
               active_color = color_value(fields[5], 0x00FF00),
             }

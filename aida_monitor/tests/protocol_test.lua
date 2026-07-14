@@ -26,6 +26,19 @@ assert(model.items.Label1.text_style.underline and model.items.Label1.text_style
 assert(model.items.Label1.text_style.shadow.x == 2 and model.items.Label1.text_style.shadow.blur == 1, "shadow")
 assert(model.items.Gph4.params.font_size == 11, "graph point size converted to pixels")
 
+local layered = Layout.parse([=[<html><head><style>body {
+background-color:#010203; background-image:url("wall paper.png") }</style></head><body>
+<span id="Label2" style="position:absolute;left:0;top:0;z-index:5">TOP</span>
+<span id="Label1" style="position:absolute;left:0;top:0;z-index:-1">BOTTOM</span>
+</body></html>]=])
+assert(layered and layered.background_image, "CSS body background image parsed")
+assert(layered.background_image.src == "wall paper.png", "background URL decoded")
+assert(layered.background_image.fit == "stretch", "background uses full-screen stretch")
+assert(layered.background_image.geometry.w == 320 and layered.background_image.geometry.h == 240,
+  "background is normalized to screen dimensions")
+assert(layered.pages[1].items[1].id == "Label1" and layered.pages[1].items[2].id == "Label2",
+  "z-index establishes stable page layers")
+
 local nested_sensor = Layout.parse([=[<html><style>body { background-color:#000000 }</style><body>
 <div id="SI12" style="position:absolute; left:10px; top:210px; width:200px"><div id="Bar12bg" style="position:absolute; left:0px; width:100px; height:15px; background:#333333"><span id="Bar12fg" style="display:block; width:50%; height:100%; background:#00DF00"></span></div><div style="position:absolute; left:0; top:0"><div style="width:200px; height:15px; display:table-cell"><div style="float:left; font-size:8pt; color:#00AAAA">GPU1&nbsp;显存频率</div><div style="width:40px; font-size:8pt; color:#00AAAA; float:right">&nbsp;MHz</div><div id="SIV12" style="font-size:8pt; color:#FFFFFF; float:right">15201</div></div></div></div>
 </body></html>]=])
@@ -45,6 +58,10 @@ assert(sample.updates[6].kind == "arc" and sample.updates[6].active_color == 0x0
 assert(sample.updates[7].text == "CPU Temp 48°C", "entity decode")
 assert(AidaClient.parse_remote_payload("ReLoad").control == "ReLoad", "reload control")
 assert(AidaClient.parse_remote_payload("Page1{|}Simple11|OK{|}").page == 2, "second page")
+local hidden_sample = AidaClient.parse_remote_payload("Simple11||{|}Gph4p||{|}Arc7p||||{|}")
+assert(hidden_sample.updates[1].visible == false, "empty text hides RemoteSensor item")
+assert(hidden_sample.updates[2].kind == "graph_clear", "empty graph update clears canvas")
+assert(hidden_sample.updates[3].visible == false, "empty arc text hides gauge")
 
 local captured_vector_options = nil
 package.preload["aida_font_test"] = function()
@@ -65,6 +82,7 @@ assert(#vector_buffer == 32 * 18 * 2, "vector wrapper buffer")
 assert(captured_vector_options.bold and captured_vector_options.italic, "vector wrapper face styles")
 assert(captured_vector_options.underline and captured_vector_options.strike, "vector wrapper decorations")
 assert(captured_vector_options.shadow_dx == 2 and captured_vector_options.shadow_blur == 1, "vector wrapper shadow")
+assert(captured_vector_options.subpixel == 1, "RGB subpixel mode is forwarded")
 
 local next_object = 10
 local canvas_formats = {}
@@ -126,6 +144,7 @@ local vector_render_transparent_count = 0
 local software_texts = {}
 local software_ops = {}
 local software_clear_count = 0
+local software_copy_count = 0
 local software_flush_count = 0
 local vector_font = {
   ready = true,
@@ -145,6 +164,11 @@ local vector_font = {
     software_clear_count = software_clear_count + 1
     return true
   end,
+  surface_copy = function()
+    software_copy_count = software_copy_count + 1
+    return true
+  end,
+  surface_image = function() return true end,
   surface_rect = function(_, _, x, y, width, height, color, opacity)
     software_ops[#software_ops + 1] = {
       kind = "rect", x = x, y = y, width = width, height = height,
@@ -209,6 +233,12 @@ assert(canvas_frame_begin_count > 0 and canvas_frame_end_count == canvas_frame_b
   "standalone vector canvases commit frames")
 assert(renderer:snapshot().compositor == "rgb565-a8", "software alpha compositor")
 assert(renderer:snapshot().surface_bytes == 320 * 240 * 2, "software surface size")
+renderer.background_surface = 2
+renderer.background_ready = true
+assert(renderer:software_render_page(1) and software_copy_count == 1,
+  "background surface is copied below dynamic items")
+renderer.background_surface = nil
+renderer.background_ready = false
 renderer:apply_sample(sample)
 assert(renderer.active_page == 1, "renderer first page")
 assert(#renderer.views.Gph4.item.history == 1, "graph history")
@@ -291,10 +321,12 @@ local page = routes["/aida_monitor/"]()
 assert(page.body:find("AIDA Noto Sans SC", 1, true), "vector font guidance")
 assert(page.body:find("下载并安装同款 TTF", 1, true), "font download")
 assert(page.body:find("B / I / U / S / SHADOW", 1, true), "style support")
+assert(page.body:find("子像素排列", 1, true), "subpixel configuration")
 local saved = web:save({ query = "host=192.168.0.232&port=9999&layout_path=%2F&path=%2Fsse" })
 assert(saved.status == "200 OK", "web config save")
 assert(saved_config:find('config.vector_font_family = "AIDA Noto Sans SC"', 1, true), "vector family persisted")
 assert(saved_config:find("aida_font.so", 1, true), "vector module persisted")
+assert(saved_config:find('config.font_subpixel = "rgb"', 1, true), "subpixel mode persisted")
 assert(not saved_config:find("config.font =", 1, true), "legacy font selection removed")
 
 print("RemoteSensor protocol tests passed")

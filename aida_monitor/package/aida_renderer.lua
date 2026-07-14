@@ -238,6 +238,11 @@ local function render_graph(view)
   local p = item.params or {}
   local width, height = item.geometry.w, item.geometry.h
   local explicit = canvas_begin(canvas)
+  if item.graph_cleared then
+    fill(canvas, item.canvas_background or 0x000000)
+    canvas_end(canvas, explicit)
+    return
+  end
   fill(canvas, p.show_background and p.background or item.canvas_background or 0x000000)
 
   local left, top, right, bottom = 0, 0, width - 1, height - 1
@@ -638,6 +643,8 @@ function Renderer.new(opts)
   self.image_loaded = 0
   self.image_skipped = 0
   self.last_image_error = ""
+  self.background_surface = nil
+  self.background_ready = false
   self.vector_font = opts.vector_font
   self.font_choice = tostring(self.config.vector_font_family or "AIDA Noto Sans SC")
   self.font_error = ""
@@ -682,6 +689,7 @@ function Renderer:surface_gradient(x, y, width, height, colors, opacity)
 end
 
 function Renderer:software_draw_text_item(item)
+  if item.visible == false then return true end
   local g = item.geometry or {}
   local style = item.text_style or {}
   local width = tonumber(g.w) or 0
@@ -693,6 +701,7 @@ function Renderer:software_draw_text_item(item)
 end
 
 function Renderer:software_draw_sensor(item)
+  if item.visible == false then return true end
   local g = item.geometry or {}
   local base_x, base_y = tonumber(g.x) or 0, tonumber(g.y) or 0
   local width = tonumber(g.w) or 0
@@ -747,10 +756,35 @@ function Renderer:software_draw_sensor(item)
     if bar_w <= 0 then bar_w = width end
     local bar_h = tonumber(bg.h) or 0
     if bar_h <= 0 then bar_h = 4 end
-    self:surface_gradient(bar_x, bar_y, bar_w, bar_h, bar.background, 255)
-    local foreground_w = math.max(0, math.floor(bar_w * clamp(bar.percent or 0, 0, 100) / 100 + 0.5))
-    if foreground_w > 0 then
-      self:surface_gradient(bar_x, bar_y, foreground_w, bar_h, bar.foreground, 255)
+    local border = math.max(0, tonumber(bar.border_width) or 0)
+    border = math.min(border, math.floor(math.min(bar_w, bar_h) / 2))
+    local inner_x, inner_y = bar_x + border, bar_y + border
+    local inner_w, inner_h = math.max(0, bar_w - border * 2), math.max(0, bar_h - border * 2)
+    if inner_w > 0 and inner_h > 0 then
+      self:surface_gradient(inner_x, inner_y, inner_w, inner_h, bar.background, 255)
+      local percent = clamp(bar.percent or 0, 0, 100) / 100
+      if bar.orientation == "vertical" then
+        local foreground_h = math.max(0, math.floor(inner_h * percent + 0.5))
+        if foreground_h > 0 then
+          local foreground_y = bar.reverse and inner_y or (inner_y + inner_h - foreground_h)
+          self:surface_gradient(inner_x, foreground_y, inner_w, foreground_h, bar.foreground, 255)
+        end
+      else
+        local foreground_w = math.max(0, math.floor(inner_w * percent + 0.5))
+        if foreground_w > 0 then
+          local foreground_x = bar.reverse and (inner_x + inner_w - foreground_w) or inner_x
+          self:surface_gradient(foreground_x, inner_y, foreground_w, inner_h, bar.foreground, 255)
+        end
+      end
+    end
+    if border > 0 then
+      local color = bar.border_color or 0
+      self.vector_font:surface_rect(self.software_surface, bar_x, bar_y, bar_w, border, color, 255)
+      self.vector_font:surface_rect(self.software_surface, bar_x, bar_y + bar_h - border,
+        bar_w, border, color, 255)
+      self.vector_font:surface_rect(self.software_surface, bar_x, bar_y, border, bar_h, color, 255)
+      self.vector_font:surface_rect(self.software_surface, bar_x + bar_w - border, bar_y,
+        border, bar_h, color, 255)
     end
   end
 
@@ -762,6 +796,7 @@ function Renderer:software_draw_sensor(item)
 end
 
 function Renderer:software_draw_graph(item)
+  if item.visible == false or item.graph_cleared then return true end
   local g, p = item.geometry or {}, item.params or {}
   local ox, oy = tonumber(g.x) or 0, tonumber(g.y) or 0
   local width, height = math.max(1, tonumber(g.w) or 1), math.max(1, tonumber(g.h) or 1)
@@ -864,6 +899,7 @@ function Renderer:software_draw_graph(item)
 end
 
 function Renderer:software_draw_arc(item)
+  if item.visible == false then return true end
   local g, p = item.geometry or {}, item.params or {}
   local ox, oy = tonumber(g.x) or 0, tonumber(g.y) or 0
   local width, height = math.max(1, tonumber(g.w) or 1), math.max(1, tonumber(g.h) or 1)
@@ -918,7 +954,12 @@ end
 function Renderer:software_render_page(page_index)
   local page = self.layout.pages[page_index]
   if not page or not self.software_surface then return false end
-  local ok, err = self.vector_font:surface_clear(self.software_surface, self.layout.background or 0)
+  local ok, err
+  if self.background_surface and self.background_ready then
+    ok, err = self.vector_font:surface_copy(self.software_surface, self.background_surface)
+  else
+    ok, err = self.vector_font:surface_clear(self.software_surface, self.layout.background or 0)
+  end
   if not ok then self.font_error = tostring(err or "surface clear failed") return false end
   for _, item in ipairs(page.items or {}) do
     if item.kind == "label" or item.kind == "simple" then self:software_draw_text_item(item)
@@ -1123,6 +1164,21 @@ function Renderer:build()
       self.font_error = tostring(surface_error or "software surface unavailable")
     else
       self.software_surface = surface
+      if self.layout.background_image then
+        local background_surface, background_error = self.vector_font:surface_create(
+          320, 240, self.layout.background or 0)
+        if background_surface then
+          self.background_surface = background_surface
+          self.image_queue[#self.image_queue + 1] = {
+            page = nil,
+            item = self.layout.background_image,
+            view = { item = self.layout.background_image, kind = "background" },
+          }
+        else
+          self.last_image_error = tostring(background_error or "background surface unavailable")
+          self.image_skipped = self.image_skipped + 1
+        end
+      end
       self.page_canvases = {}
       for index = 1, self.layout.page_count do
         local page = make_panel(self.root, 0, 0, 320, 240, self.layout.background or 0, 255)
@@ -1145,6 +1201,11 @@ function Renderer:build()
       end
       self.vector_font:surface_free(self.software_surface)
       self.software_surface = nil
+      if self.background_surface then
+        self.vector_font:surface_free(self.background_surface)
+        self.background_surface = nil
+      end
+      self.background_ready = false
       self.page_canvases = nil
       self.pages = {}
       self.views = {}
@@ -1171,6 +1232,10 @@ function Renderer:load_next_image()
     self.image_skipped = self.image_skipped + 1
     self.last_image_error = tostring(reason or "image unavailable")
     self.log("image_skipped", pending.item.src, self.last_image_error)
+    if pending.item.is_background then
+      self.background_ready = false
+      return
+    end
     local g = pending.item.geometry
     local width = g.w > 0 and g.w or 40
     local height = g.h > 0 and g.h or 40
@@ -1185,6 +1250,23 @@ function Renderer:load_next_image()
     pending.view.placeholder = label
   end
   local function attach(info)
+    if pending.item.is_background then
+      local cleared, clear_error = self.vector_font:surface_clear(
+        self.background_surface, self.layout.background or 0)
+      local rendered, render_error = false, nil
+      if cleared then
+        rendered, render_error = self.vector_font:surface_image(self.background_surface,
+          info.data, 0, 0, 320, 240, pending.item.fit or "stretch")
+      end
+      if not cleared or not rendered then
+        placeholder(clear_error or render_error or "background decode failed")
+      else
+        self.background_ready = true
+        self.image_loaded = self.image_loaded + 1
+        for index = 1, #self.pages do self:software_render_page(index) end
+      end
+      return
+    end
     local object = create_image_object(pending.page, path)
     pending.view.object = object
     if object then
@@ -1231,6 +1313,9 @@ function Renderer:load_next_image()
       elseif width * height > max_pixels then
         placeholder("image is " .. tostring(width) .. "x" .. tostring(height)
           .. "; pixel limit is " .. tostring(max_pixels))
+      elseif pending.item.is_background then
+        if file and file.putcontents then pcall(file.putcontents, path, body) end
+        attach({ kind = kind, width = width, height = height, data = body })
       elseif not file or not file.putcontents then
         placeholder("file API missing")
       else
@@ -1268,21 +1353,28 @@ function Renderer:apply_update(update, defer_render)
       elseif item.text_style then
         item.text_style.text = tostring(update.text or "")
       end
+      item.visible = update.visible ~= false
     elseif update.kind == "bar" and item.bar then
       item.bar.percent = tonumber(update.percent) or 0
+      item.visible = update.visible ~= false
       if update.background then item.bar.background = update.background end
       if update.foreground then item.bar.foreground = update.foreground end
     elseif update.kind == "graph" then
+      item.graph_cleared = false
       local history = item.history
       history[#history + 1] = tonumber(update.value) or 0
       local max_points = item.max_points or self.config.history_points or 49
       while #history > max_points do table.remove(history, 1) end
       local density = math.max(1, tonumber(item.params and item.params.grid_density) or 10)
-      item.grid_offset = (tonumber(item.grid_offset) or 0) - 1
-      if item.grid_offset < 0 then item.grid_offset = density - 1 end
+      local delta = math.max(1, (tonumber(item.params and item.params.step) or 1) + 1)
+      item.grid_offset = ((tonumber(item.grid_offset) or 0) - delta) % density
+    elseif update.kind == "graph_clear" then
+      item.history = {}
+      item.graph_cleared = true
     elseif update.kind == "arc" then
       item.percent = tonumber(update.percent) or 0
       item.display_text = update.text or ""
+      item.visible = update.visible ~= false
       item.background_color = update.background_color
       item.active_color = update.active_color
     end
@@ -1299,17 +1391,23 @@ function Renderer:apply_update(update, defer_render)
     if update.background then apply_gradient(view.bar_bg, update.background) end
     if update.foreground then apply_gradient(view.bar_fg, update.foreground) end
   elseif update.kind == "graph" then
+    view.item.graph_cleared = false
     local history = view.item.history
     history[#history + 1] = tonumber(update.value) or 0
     local max_points = view.item.max_points or self.config.history_points or 49
     while #history > max_points do table.remove(history, 1) end
     local density = math.max(1, tonumber(view.item.params and view.item.params.grid_density) or 10)
-    view.item.grid_offset = (tonumber(view.item.grid_offset) or 0) - 1
-    if view.item.grid_offset < 0 then view.item.grid_offset = density - 1 end
+    local delta = math.max(1, (tonumber(view.item.params and view.item.params.step) or 1) + 1)
+    view.item.grid_offset = ((tonumber(view.item.grid_offset) or 0) - delta) % density
+    render_graph(view)
+  elseif update.kind == "graph_clear" then
+    view.item.history = {}
+    view.item.graph_cleared = true
     render_graph(view)
   elseif update.kind == "arc" then
     view.item.percent = tonumber(update.percent) or 0
     view.item.display_text = update.text or ""
+    view.item.visible = update.visible ~= false
     view.item.background_color = update.background_color
     view.item.active_color = update.active_color
     render_arc(view)
@@ -1349,6 +1447,10 @@ function Renderer:snapshot()
     psram_free = font_stats.psram_free or 0,
     psram_largest = font_stats.psram_largest or 0,
     compositor = self.software_mode and "rgb565-a8" or "legacy-canvas",
+    background_ready = self.background_ready,
+    layer_model = self.software_mode and "background/compositor/foreground" or "legacy-dom",
+    subpixel = font_stats.subpixel or tostring(self.config.font_subpixel or "off"),
+    antialiasing = font_stats.antialiasing or "firmware",
     surface_bytes = font_stats.surface_bytes or 0,
     surface_flushes = font_stats.surface_flushes or 0,
   }
@@ -1359,6 +1461,11 @@ function Renderer:destroy()
     self.vector_font:surface_free(self.software_surface)
     self.software_surface = nil
   end
+  if self.background_surface and self.vector_font then
+    self.vector_font:surface_free(self.background_surface)
+    self.background_surface = nil
+  end
+  self.background_ready = false
   call(lv_obj_clean, self.root)
   self.image_queue = {}
   self.image_busy = false

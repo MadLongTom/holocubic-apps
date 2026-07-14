@@ -10,6 +10,9 @@ config.path = "/sse"
 config.vector_font_family = "AIDA Noto Sans SC"
 config.vector_font_module = "/sd/apps/aida_monitor/modules/aida_font.so"
 config.vector_font_path = "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"
+-- LCD stripe order. Use "bgr" if colored fringes look reversed, or "off"
+-- when the panel/optics do not preserve physical subpixels.
+config.font_subpixel = "rgb"
 
 config.timeout_ms = 7000
 config.reconnect_ms = 2000
