@@ -679,45 +679,51 @@ function Renderer:software_draw_sensor(item)
   local width = tonumber(g.w) or 0
   if width <= 0 then width = math.max(1, 320 - base_x) end
 
-  local function draw_entry(entry, fallback_x)
-    if not entry then return true end
+  local function entry_metrics(entry)
+    if not entry then return nil end
     local css = entry.style or {}
     local style = entry.text_style or {}
     local measured = self.vector_font:measure(style.text or "", style)
       or math.max(1, math.floor((style.font and style.font.size or 12) * #(style.text or "") * 0.6))
     local box_width = style_number(css, "width", measured + 3)
     box_width = math.max(1, math.min(width, math.floor(box_width + 0.5)))
-    local local_x
-    local right = style_number(css, "right", nil)
-    local left = style_number(css, "left", nil)
-    if right ~= nil then local_x = width - right - box_width
-    elseif left ~= nil then local_x = left
-    else local_x = fallback_x or 0 end
-    local height = vector_text_height(style, 240 - base_y)
-    return self:surface_text(base_x + local_x, base_y, box_width, height,
-      style.text or "", style)
+    return { css = css, style = style, width = box_width,
+      height = vector_text_height(style, 240 - base_y) }
   end
 
-  draw_entry(item.label, 0)
-  draw_entry(item.value, 0)
-  draw_entry(item.unit, 0)
+  local function entry_x(metrics, fallback_x)
+    if not metrics then return fallback_x or 0 end
+    local css = metrics.css
+    local right = style_number(css, "right", nil)
+    local left = style_number(css, "left", nil)
+    if right ~= nil then return width - right - metrics.width end
+    if left ~= nil then return left end
+    if tostring(css.float or ""):lower() == "right" then return width - metrics.width end
+    return fallback_x or 0
+  end
+
+  local function draw_entry(entry, metrics, local_x)
+    if not entry or not metrics then return true end
+    return self:surface_text(base_x + local_x, base_y, metrics.width, metrics.height,
+      metrics.style.text or "", metrics.style)
+  end
+
+  local label_metrics = entry_metrics(item.label)
+  local value_metrics = entry_metrics(item.value)
+  local unit_metrics = entry_metrics(item.unit)
+  local unit_x = entry_x(unit_metrics, 0)
+  local value_x = entry_x(value_metrics, 0)
+  if value_metrics and tostring(value_metrics.css.float or ""):lower() == "right"
+    and style_number(value_metrics.css, "right", nil) == nil then
+    value_x = (unit_metrics and unit_x or width) - value_metrics.width
+  end
+  local label_x = entry_x(label_metrics, 0)
 
   if item.bar then
     local bar = item.bar
     local bg = bar.geometry or {}
     local bar_x = base_x + (tonumber(bg.x) or 0)
-    local bar_y
-    if bar.style and bar.style.top == nil then
-      local line_size = 8
-      for _, text_item in ipairs({ item.label, item.value, item.unit }) do
-        line_size = math.max(line_size,
-          tonumber(text_item and text_item.text_style and text_item.text_style.font
-            and text_item.text_style.font.size) or 0)
-      end
-      bar_y = base_y + math.ceil(line_size * 1.2) + (bar.margin_top or 0)
-    else
-      bar_y = base_y + (tonumber(bg.y) or 0) + (bar.margin_top or 0)
-    end
+    local bar_y = base_y + (tonumber(bg.y) or 0) + (bar.margin_top or 0)
     local bar_w = tonumber(bg.w) or 0
     if bar_w <= 0 then bar_w = width end
     local bar_h = tonumber(bg.h) or 0
@@ -728,6 +734,12 @@ function Renderer:software_draw_sensor(item)
       self:surface_gradient(bar_x, bar_y, foreground_w, bar_h, bar.foreground, 255)
     end
   end
+
+  -- AIDA64 places the Sensor bar first in the DOM and overlays its text row.
+  -- Alpha-composite the leaf text after the bar so Label/Value/Unit stay visible.
+  draw_entry(item.label, label_metrics, label_x)
+  draw_entry(item.value, value_metrics, value_x)
+  draw_entry(item.unit, unit_metrics, unit_x)
 end
 
 function Renderer:software_draw_graph(item)

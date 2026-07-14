@@ -276,12 +276,16 @@ local function parse_sensor(model, page_index, line)
     geometry = style_geometry(outer),
   }
 
-  for raw_style, text in inner:gmatch('<div style="([^"]*)">(.-)</div>') do
+  -- AIDA64 emits both a flat SensorItem and a nested table-cell variant when
+  -- Bar is enabled. Match leaf divs only so wrapper markup cannot consume the
+  -- actual label/unit nodes.
+  for raw_style, text in inner:gmatch('<div style="([^"]*)">([^<]-)</div>') do
     local style = parse_style(raw_style)
     local fields = text_fields(style, text)
     if tostring(style.float or ""):lower() == "left" and not item.label then
       item.label = { style = style, text_style = fields }
-    elseif style.right == "0" or style.right == "0px" then
+    elseif style.right == "0" or style.right == "0px"
+      or tostring(style.float or ""):lower() == "right" then
       item.unit = { style = style, text_style = fields }
     end
   end

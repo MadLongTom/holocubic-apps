@@ -162,13 +162,15 @@ def parse_layout(document: str, source_base: str | None = None,
                 data["value_id"] = value_id
                 data["value_style"] = parse_style(value_raw)
                 data["value"] = text_style(data["value_style"], value)
-            generic = re.findall(r'<div style="([^"]*)">(.*?)</div>', inner)
+            # Bar-enabled SensorItems wrap the text row in nested divs. Match
+            # leaf text nodes so the wrappers cannot swallow label/unit markup.
+            generic = re.findall(r'<div style="([^"]*)">([^<]*?)</div>', inner)
             for child_raw, child_text in generic:
                 child_style = parse_style(child_raw)
                 entry = {"style": child_style, "text": text_style(child_style, child_text)}
                 if child_style.get("float", "").lower() == "left" and "label" not in data:
                     data["label"] = entry
-                elif "right" in child_style:
+                elif "right" in child_style or child_style.get("float", "").lower() == "right":
                     data["unit"] = entry
             bar_match = re.search(
                 r'<div id="(Bar\d+bg)" style="([^"]*)"><span id="(Bar\d+fg)" style="([^"]*)"></span></div>',
@@ -514,15 +516,6 @@ def render_page(layout: Layout, page_index: int) -> Image.Image:
             draw_text(draw, (g["x"], g["y"]), g["w"] or W - g["x"], item.data["text"])
         elif item.kind == "sensor":
             width = g["w"] or W - g["x"]
-            if item.data.get("label"):
-                draw_text(draw, (g["x"], g["y"]), width, item.data["label"]["text"])
-            if item.data.get("value"):
-                value_x = g["x"] + integer(item.data["value_style"].get("left"))
-                draw_text(draw, (value_x, g["y"]), width - (value_x - g["x"]), item.data["value"])
-            if item.data.get("unit"):
-                unit = dict(item.data["unit"]["text"])
-                unit["align"] = "right"
-                draw_text(draw, (g["x"], g["y"]), width, unit)
             bar = item.data.get("bar")
             if bar:
                 bg = bar["geometry"]
@@ -532,6 +525,35 @@ def render_page(layout: Layout, page_index: int) -> Image.Image:
                 fill_width = round(bw * max(0, min(100, bar["percent"])) / 100)
                 if fill_width:
                     vertical_gradient(draw, (bx, by, bx + fill_width - 1, by + bh - 1), bar["foreground"])
+            if item.data.get("label"):
+                draw_text(draw, (g["x"] + integer(item.data["label"]["style"].get("left")), g["y"]),
+                          width, item.data["label"]["text"])
+            unit_x = g["x"] + width
+            if item.data.get("unit"):
+                unit_style = item.data["unit"]["style"]
+                unit = dict(item.data["unit"]["text"])
+                unit_font = font(unit.get("family", "Arial"), int(unit.get("size", 10)),
+                                 unit.get("bold", False), unit.get("italic", False))
+                unit_box = draw.textbbox((0, 0), unit.get("text", ""), font=unit_font)
+                unit_width = integer(unit_style.get("width")) or max(1, unit_box[2] - unit_box[0] + 3)
+                unit_x = g["x"] + width - integer(unit_style.get("right")) - unit_width
+                draw_text(draw, (unit_x, g["y"]), unit_width, unit)
+            if item.data.get("value"):
+                value_style = item.data["value_style"]
+                value = item.data["value"]
+                value_font = font(value.get("family", "Arial"), int(value.get("size", 10)),
+                                  value.get("bold", False), value.get("italic", False))
+                value_box = draw.textbbox((0, 0), value.get("text", ""), font=value_font)
+                value_width = max(1, value_box[2] - value_box[0] + 3)
+                if "left" in value_style:
+                    value_x = g["x"] + integer(value_style.get("left"))
+                elif "right" in value_style:
+                    value_x = g["x"] + width - integer(value_style.get("right")) - value_width
+                elif value_style.get("float", "").lower() == "right":
+                    value_x = unit_x - value_width
+                else:
+                    value_x = g["x"]
+                draw_text(draw, (value_x, g["y"]), value_width, value)
         elif item.kind == "graph":
             render_graph(draw, item, layout.background)
         elif item.kind == "arc":

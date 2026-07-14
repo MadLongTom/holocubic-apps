@@ -26,6 +26,15 @@ assert(model.items.Label1.text_style.underline and model.items.Label1.text_style
 assert(model.items.Label1.text_style.shadow.x == 2 and model.items.Label1.text_style.shadow.blur == 1, "shadow")
 assert(model.items.Gph4.params.font_size == 11, "graph point size converted to pixels")
 
+local nested_sensor = Layout.parse([=[<html><style>body { background-color:#000000 }</style><body>
+<div id="SI12" style="position:absolute; left:10px; top:210px; width:200px"><div id="Bar12bg" style="position:absolute; left:0px; width:100px; height:15px; background:#333333"><span id="Bar12fg" style="display:block; width:50%; height:100%; background:#00DF00"></span></div><div style="position:absolute; left:0; top:0"><div style="width:200px; height:15px; display:table-cell"><div style="float:left; font-size:8pt; color:#00AAAA">GPU1&nbsp;显存频率</div><div style="width:40px; font-size:8pt; color:#00AAAA; float:right">&nbsp;MHz</div><div id="SIV12" style="font-size:8pt; color:#FFFFFF; float:right">15201</div></div></div></div>
+</body></html>]=])
+assert(nested_sensor and nested_sensor.items.SI12, "nested SensorItem parsed")
+assert(nested_sensor.items.SI12.label.text_style.text == "GPU1 显存频率", "nested sensor label")
+assert(nested_sensor.items.SI12.value.text_style.text == "15201", "nested sensor value")
+assert(nested_sensor.items.SI12.unit.text_style.text == " MHz", "nested sensor unit")
+assert(nested_sensor.items.SI12.bar.percent == 50, "nested sensor bar")
+
 local payload = "Page0{|}SIV3|42{|}Bar3p|42|#202020,#151515|#00FF00,#00AA00{|}Gph4p|42|{|}Gph5p|42|{|}Gph6p|42|{|}Arc7p|42|42|#202020|#00FF00{|}Simple11|CPU Temp 48&deg;C{|}"
 local sample = AidaClient.parse_remote_payload(payload)
 assert(sample.page == 1, "active page")
@@ -115,6 +124,7 @@ end
 local vector_render_count = 0
 local vector_render_transparent_count = 0
 local software_texts = {}
+local software_ops = {}
 local software_clear_count = 0
 local software_flush_count = 0
 local vector_font = {
@@ -135,7 +145,10 @@ local vector_font = {
     software_clear_count = software_clear_count + 1
     return true
   end,
-  surface_rect = function() return true end,
+  surface_rect = function(_, _, x, y, width, height)
+    software_ops[#software_ops + 1] = { kind = "rect", x = x, y = y, width = width, height = height }
+    return true
+  end,
   surface_circle = function() return true end,
   surface_line = function() return true end,
   surface_arc = function() return true end,
@@ -144,6 +157,7 @@ local vector_font = {
     software_texts[#software_texts + 1] = {
       x = x, y = y, width = width, height = height, text = tostring(text),
     }
+    software_ops[#software_ops + 1] = { kind = "text", x = x, y = y, text = tostring(text) }
     return true
   end,
   surface_pixels = function()
@@ -199,6 +213,14 @@ end
 assert(saw_sensor_value, "sensor value alpha-composited into page surface")
 assert(saw_sensor_label, "sensor label alpha-composited into page surface")
 assert(saw_sensor_unit, "sensor unit alpha-composited into page surface")
+local sensor_bar_op, sensor_label_op
+for index, operation in ipairs(software_ops) do
+  if operation.kind == "rect" and operation.x == 4 and operation.y == 47
+    and operation.width == 145 and operation.height == 1 then sensor_bar_op = sensor_bar_op or index end
+  if operation.kind == "text" and operation.text == "CPU" then sensor_label_op = sensor_label_op or index end
+end
+assert(sensor_bar_op and sensor_label_op and sensor_bar_op < sensor_label_op,
+  "SensorItem bar is composited before its text row")
 
 local routes = {}
 local saved_config = ""
