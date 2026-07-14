@@ -646,7 +646,8 @@ function Renderer.new(opts)
   self.background_surface = nil
   self.background_ready = false
   self.vector_font = opts.vector_font
-  self.font_choice = tostring(self.config.vector_font_family or "AIDA Noto Sans SC")
+  self.font_choice = tostring(self.vector_font and self.vector_font.family
+    or self.config.vector_font_family or "AIDA Noto Sans SC")
   self.font_error = ""
   self.active_page = 1
   return self
@@ -1448,6 +1449,11 @@ function Renderer:snapshot()
     font_cache_entries = font_stats.cache_entries or 0,
     font_renders = font_stats.renders or 0,
     font_missing_glyphs = font_stats.missing_glyphs or 0,
+    font_source = font_stats.source or "default",
+    font_match = font_stats.match == true,
+    font_selection = font_stats.selection or "",
+    font_requested_families = font_stats.requested_families or "",
+    font_path = font_stats.path or "",
     internal_free = font_stats.internal_free or 0,
     psram_free = font_stats.psram_free or 0,
     psram_largest = font_stats.psram_largest or 0,

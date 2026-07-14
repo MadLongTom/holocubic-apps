@@ -14,7 +14,7 @@ The app first downloads the HTML layout from `/`, creates the corresponding 320�
 - Static PNG/JPEG/BMP images and animated GIF resources served by AIDA64
 - Multiple LCD pages and live `PageN` switching
 - Dynamic layout reload without reinstalling the app
-- On-device TrueType rendering from one bundled Chinese font at 6–96 px
+- On-device TrueType rendering from a bundled Chinese fallback or one WebUI-uploaded TTF at 6–96 px
 - Synthetic bold/italic plus underline, strikethrough, and CSS text shadow
 
 This target is the complete **RemoteSensor LCD** feature set. SensorPanel-only Custom Gauges are not emitted by the RemoteSensor web protocol; use AIDA64 Arc Gauge instead.
@@ -26,8 +26,8 @@ This target is the complete **RemoteSensor LCD** feature set. SensorPanel-only C
 3. Set the RemoteSensor port (this checkout defaults to `9999`).
 4. Set Preview Resolution to **320 × 240**.
 5. Use AIDA64's normal LCD Items editor to build the screen and pages.
-6. Install `AIDA Noto Sans SC` from the app WebUI and select it for every text
-   item so the Windows preview and HoloCubic use the same metrics.
+6. Either install the bundled `AIDA Noto Sans SC`, or upload the TTF already
+   used by the layout. The configured family must match AIDA64's font name.
 7. Click **Apply**.
 
 You should now be able to open both URLs from another LAN device:
@@ -37,7 +37,8 @@ http://<aida-host>:9999/
 http://<aida-host>:9999/sse
 ```
 
-The included `package/holo-aida.rslcd` is only an optional starter layout. Importing it is no longer required.
+The included `package/holo-aida.rslcd` mirrors the current 320×240 example
+layout and can also be downloaded directly from the app WebUI.
 
 ## Device configuration
 
@@ -47,8 +48,9 @@ Open the AIDA Monitor management page from HoloCubic WebUI. It exposes:
 - RemoteSensor port
 - Layout path (normally `/`)
 - SSE path (normally `/sse`)
-- Vector font engine status, glyph cache usage, and a download link for the
-  exact TTF that should be installed and selected in AIDA64
+- Chunked TTF upload (up to 4 MB), font-family match state, and automatic
+  fallback to the bundled Chinese face when the layout does not request it
+- Download buttons for the bundled TTF and the shipping `.rslcd` example
 - Runtime status, active page, page count, and parsed item count
 
 The defaults in this checkout are:
@@ -61,6 +63,8 @@ config.path = "/sse"
 config.vector_font_family = "AIDA Noto Sans SC"
 config.vector_font_module = "/sd/apps/aida_monitor/modules/aida_font.so"
 config.vector_font_path = "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"
+config.vector_font_custom_family = ""
+config.vector_font_custom_path = "/sd/apps/aida_monitor/font/uploaded.ttf"
 ```
 
 ## Rendering model
@@ -72,16 +76,19 @@ histories, scales, grids, frames, and active page are parsed. Font sizes in
 points are converted to CSS pixels (`pt × 4/3`) and rendered at the resulting
 integer size rather than snapped to a firmware bitmap size.
 
-The bundled native `aida_font.so` module uses `stb_truetype` to rasterize one
-OFL-licensed, GB2312-subsetted Noto Sans SC TrueType face. It maintains a
+The bundled native `aida_font.so` module uses `stb_truetype` to rasterize an
+OFL-licensed, GB2312-subsetted Noto Sans SC fallback or one uploaded TrueType
+face. Before building a layout, the app compares AIDA64's requested font
+families with the uploaded family; a mismatch or load failure reopens the
+bundled fallback. The renderer maintains a
 320×240 RGB565 page surface in PSRAM and blends glyph A8 coverage, shadows,
 graphs, arcs, and Sensor text before the firmware sees the frame. This avoids
 firmware chroma-key limitations and preserves overlapping content. A 512 KiB
 LRU glyph cache avoids rebuilding common digits and labels on each SSE update.
 The regular outline is also used to synthesize bold and italic variants;
 underline, strikethrough, and `text-shadow` are composited by the renderer. If
-the module or TTF cannot load, the app reports the reason in WebUI and keeps a
-firmware-font fallback visible.
+the uploaded TTF cannot load, the app reports the reason in WebUI and keeps the
+bundled vector fallback visible.
 
 Remote images are stored under `/sd/apps/aida_monitor/cache`. A layout `ReLoad` rebuilds the UI and refreshes the resources so replacing an image under the same filename is reflected on the device.
 
@@ -105,6 +112,8 @@ info.html
 font/aida_noto_sans_sc.ttf
 font/OFL.txt
 modules/aida_font.so
+holo-aida.rslcd
+holo-aida-template.txt
 ```
 
 ## Rebuilding the vector assets

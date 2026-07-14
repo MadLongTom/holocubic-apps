@@ -111,6 +111,44 @@ assert(captured_vector_options.underline and captured_vector_options.strike, "ve
 assert(captured_vector_options.shadow_dx == 2 and captured_vector_options.shadow_blur == 1, "vector wrapper shadow")
 assert(captured_vector_options.subpixel == 1, "RGB subpixel mode is forwarded")
 
+local selected_paths = {}
+package.preload["aida_font_select_test"] = function()
+  return {
+    open = function(path)
+      selected_paths[#selected_paths + 1] = path
+      if path == "/broken.ttf" then return false, "broken font" end
+      return true
+    end,
+    render = function(_, width, height) return string.rep("\0", width * height * 2) end,
+    stats = function() return { loaded = true, engine = "stb_truetype" } end,
+  }
+end
+local font_select_config = {
+  vector_font_module = "aida_font_select_test",
+  vector_font_family = "AIDA Noto Sans SC",
+  vector_font_default_path = "/default.ttf",
+  vector_font_custom_family = "Noto Sans SC",
+  vector_font_custom_path = "/custom.ttf",
+}
+local font_select_layout = Layout.parse([=[<html><style>body { background-color:#000 }</style><body>
+<span id="Label1" style="position:absolute;left:0;top:0;font-family:'Noto Sans SC'">FONT</span>
+</body></html>]=])
+local font_selector = VectorFont.new(font_select_config)
+assert(font_selector:select_for_layout(font_select_layout, font_select_config), "uploaded font selected")
+assert(font_selector.source == "uploaded" and font_selector.match
+  and font_selector.family == "Noto Sans SC", "layout family matches uploaded TTF")
+assert(selected_paths[#selected_paths] == "/custom.ttf", "custom TTF opened after match")
+local unmatched_layout = Layout.parse([=[<html><style>body { background-color:#000 }</style><body>
+<span id="Label1" style="position:absolute;left:0;top:0;font-family:Tahoma">FONT</span>
+</body></html>]=])
+assert(font_selector:select_for_layout(unmatched_layout, font_select_config), "default font selected")
+assert(font_selector.source == "default" and not font_selector.match
+  and selected_paths[#selected_paths] == "/default.ttf", "unmatched family falls back to default")
+font_select_config.vector_font_custom_path = "/broken.ttf"
+assert(font_selector:select_for_layout(font_select_layout, font_select_config), "broken custom falls back")
+assert(font_selector.source == "default" and font_selector.selection_error:find("broken font", 1, true),
+  "custom load failure is reported while default remains available")
+
 local next_object = 10
 local canvas_formats = {}
 local function object()
@@ -326,11 +364,51 @@ assert(sensor_bar_op and sensor_label_op and sensor_bar_op < sensor_label_op,
 
 local routes = {}
 local saved_config = ""
+local virtual_files = {}
+local virtual_dirs = { ["/sd/apps/aida_monitor/font"] = true }
 file = {
-  putcontents = function(_, body) saved_config = body return true end,
+  putcontents = function(path, body) saved_config = body virtual_files[path] = body return true end,
+  stat = function(path)
+    if virtual_dirs[path] then return { is_dir = true, size = 0 } end
+    local body = virtual_files[path]
+    if body == nil then return nil end
+    return { is_dir = false, size = #body }
+  end,
+  mkdir = function(path) virtual_dirs[path] = true return true end,
+  remove = function(path) virtual_files[path] = nil virtual_dirs[path] = nil return true end,
+  rename = function(from, to)
+    if virtual_files[from] == nil then return false end
+    virtual_files[to], virtual_files[from] = virtual_files[from], nil
+    return true
+  end,
+  open = function(path, mode)
+    if mode == "w+" then virtual_files[path] = ""
+    elseif mode == "a+" and virtual_files[path] == nil then return nil
+    elseif mode == "r" and virtual_files[path] == nil then return nil end
+    local pos = mode == "a+" and (#virtual_files[path] + 1) or 1
+    return {
+      write = function(_, chunk)
+        local body = virtual_files[path] or ""
+        if pos > #body then body = body .. chunk
+        else body = body:sub(1, pos - 1) .. chunk .. body:sub(pos + #chunk) end
+        virtual_files[path], pos = body, pos + #chunk
+        return true
+      end,
+      read = function(_, size)
+        local body = virtual_files[path] or ""
+        if pos > #body then return nil end
+        local chunk = body:sub(pos, pos + size - 1)
+        pos = pos + #chunk
+        return chunk
+      end,
+      flush = function() return true end,
+      close = function() return true end,
+    }
+  end,
 }
 httpd = {
   GET = "GET",
+  PUT = "PUT",
   start = function() end,
   dynamic = function(_, route, handler) routes[route] = handler end,
   unregister = function() end,
@@ -346,10 +424,13 @@ local web = Web.new({
 web:start()
 local page = routes["/aida_monitor/"]()
 assert(page.body:find("AIDA Noto Sans SC", 1, true), "vector font guidance")
-assert(page.body:find("下载并安装同款 TTF", 1, true), "font download")
-assert(page.body:find("B / I / U / S / SHADOW", 1, true), "style support")
+assert(page.body:find("上传并匹配 TTF", 1, true), "font upload control")
+assert(page.body:find("下载内置中文字体", 1, true), "font download")
+assert(page.body:find("下载示例布局模板", 1, true), "layout template download")
+assert(page.body:find("holo%-aida%-template%.txt"), "template uses firmware-supported static MIME")
 assert(page.body:find("子像素排列", 1, true), "subpixel configuration")
-assert(page.body:find("翻页冷却 ms", 1, true), "tilt page cooldown configuration")
+assert(page.body:find("翻页冷却 / MS", 1, true), "tilt page cooldown configuration")
+assert(routes["/aida_monitor/api/font"], "font upload route registered within handler budget")
 local saved = web:save({ query = "host=192.168.0.232&port=9999&layout_path=%2F&path=%2Fsse" })
 assert(saved.status == "200 OK", "web config save")
 assert(saved_config:find('config.vector_font_family = "AIDA Noto Sans SC"', 1, true), "vector family persisted")
@@ -358,5 +439,27 @@ assert(saved_config:find('config.font_subpixel = "rgb"', 1, true), "subpixel mod
 assert(saved_config:find("config.tilt_page_cooldown_ms = 1000", 1, true),
   "tilt page cooldown persisted")
 assert(not saved_config:find("config.font =", 1, true), "legacy font selection removed")
+
+local ttf_payload = "\0\1\0\0" .. string.rep("\0", 1020)
+local body_sent = false
+local uploaded = web:upload_font({
+  query = "offset=0&total=1024&name=DeskSans.ttf&family=Noto+Sans+SC",
+  getbody = function()
+    if body_sent then return nil end
+    body_sent = true
+    return ttf_payload
+  end,
+})
+assert(uploaded.status == "200 OK", "font upload accepted")
+assert(web.config.vector_font_custom_family == "Noto Sans SC", "uploaded family configured")
+assert(virtual_files["/sd/apps/aida_monitor/font/uploaded.ttf"] == ttf_payload,
+  "uploaded TTF atomically installed")
+assert(saved_config:find('config.vector_font_custom_family = "Noto Sans SC"', 1, true),
+  "uploaded font match persisted")
+local restored = web:reset_font()
+assert(restored.status == "200 OK" and web.config.vector_font_custom_family == "",
+  "default font can be restored")
+assert(virtual_files["/sd/apps/aida_monitor/font/uploaded.ttf"] == nil,
+  "restoring default removes uploaded font")
 
 print("RemoteSensor protocol tests passed")

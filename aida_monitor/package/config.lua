@@ -10,6 +10,15 @@ config.path = "/sse"
 config.vector_font_family = "AIDA Noto Sans SC"
 config.vector_font_module = "/sd/apps/aida_monitor/modules/aida_font.so"
 config.vector_font_path = "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"
+config.vector_font_default_path = "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"
+-- WebUI stores one user-supplied TTF here. It is selected only when its
+-- configured family is present in the current AIDA64 layout; otherwise the
+-- bundled Chinese font above remains active.
+config.vector_font_custom_family = ""
+config.vector_font_custom_path = "/sd/apps/aida_monitor/font/uploaded.ttf"
+config.vector_font_custom_name = ""
+config.vector_font_custom_bytes = 0
+config.font_upload_max_bytes = 4194304
 -- LCD stripe order. Use "bgr" if colored fringes look reversed, or "off"
 -- when the panel/optics do not preserve physical subpixels.
 config.font_subpixel = "rgb"

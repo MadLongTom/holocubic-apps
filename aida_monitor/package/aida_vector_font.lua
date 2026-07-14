@@ -22,6 +22,50 @@ local function subpixel_value(order)
   return 0
 end
 
+local function trim(value)
+  return tostring(value or ""):match("^%s*(.-)%s*$") or ""
+end
+
+local function clean_family(value)
+  value = trim(value)
+  if (value:sub(1, 1) == '"' and value:sub(-1) == '"')
+    or (value:sub(1, 1) == "'" and value:sub(-1) == "'") then
+    value = value:sub(2, -2)
+  end
+  return trim(value)
+end
+
+local function normalize_family(value)
+  value = clean_family(value):lower()
+  return (value:gsub("[%s%p%c]", ""))
+end
+
+local function collect_layout_families(layout)
+  local result, seen = {}, {}
+  local function add(raw)
+    for raw_family in tostring(raw or ""):gmatch("[^,]+") do
+      local key = normalize_family(raw_family)
+      if key ~= "" and not seen[key] then
+        seen[key] = true
+        result[#result + 1] = clean_family(raw_family)
+      end
+    end
+  end
+  local function add_text_style(style)
+    add(style and style.font and style.font.family)
+  end
+  for _, page in ipairs(layout and layout.pages or {}) do
+    for _, item in ipairs(page.items or {}) do
+      add_text_style(item.text_style)
+      add_text_style(item.label and item.label.text_style)
+      add_text_style(item.value and item.value.text_style)
+      add_text_style(item.unit and item.unit.text_style)
+      add(item.params and item.params.font_family)
+    end
+  end
+  return result
+end
+
 local function render_options(text_style, opaque, subpixel_order)
   text_style = text_style or {}
   local font = text_style.font or {}
@@ -46,8 +90,19 @@ function VectorFont.new(config)
   config = config or {}
   local self = setmetatable({
     family = tostring(config.vector_font_family or "AIDA Noto Sans SC"),
+    default_family = tostring(config.vector_font_family or "AIDA Noto Sans SC"),
     module_path = tostring(config.vector_font_module or "/sd/apps/aida_monitor/modules/aida_font.so"),
-    font_path = tostring(config.vector_font_path or "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"),
+    default_path = tostring(config.vector_font_default_path or config.vector_font_path
+      or "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"),
+    custom_family = tostring(config.vector_font_custom_family or ""),
+    custom_path = tostring(config.vector_font_custom_path or "/sd/apps/aida_monitor/font/uploaded.ttf"),
+    font_path = tostring(config.vector_font_default_path or config.vector_font_path
+      or "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf"),
+    source = "default",
+    match = false,
+    selection = "bundled default",
+    selection_error = "",
+    requested_families = {},
     subpixel_order = tostring(config.font_subpixel or "rgb"):lower(),
     module = nil,
     ready = false,
@@ -86,6 +141,82 @@ function VectorFont.new(config)
     and type(module_or_error.surface_copy) == "function"
     and type(module_or_error.surface_image) == "function"
   return self
+end
+
+function VectorFont:select_for_layout(layout, config)
+  config = config or {}
+  self.default_family = tostring(config.vector_font_family or self.default_family or "AIDA Noto Sans SC")
+  self.default_path = tostring(config.vector_font_default_path or config.vector_font_path
+    or self.default_path or "/sd/apps/aida_monitor/font/aida_noto_sans_sc.ttf")
+  self.custom_family = trim(config.vector_font_custom_family or self.custom_family)
+  self.custom_path = tostring(config.vector_font_custom_path or self.custom_path
+    or "/sd/apps/aida_monitor/font/uploaded.ttf")
+  self.subpixel_order = tostring(config.font_subpixel or self.subpixel_order or "rgb"):lower()
+  self.requested_families = collect_layout_families(layout)
+  self.selection_error = ""
+
+  if not self.module or type(self.module.open) ~= "function" then
+    self.ready = false
+    self.error = self.error ~= "" and self.error or "vector module unavailable"
+    return false, self.error
+  end
+
+  local wanted = normalize_family(self.custom_family)
+  local matched_family = nil
+  if wanted ~= "" then
+    for _, family in ipairs(self.requested_families) do
+      if normalize_family(family) == wanted then
+        matched_family = family
+        break
+      end
+    end
+  end
+
+  local use_custom = wanted ~= "" and matched_family ~= nil
+  local path = use_custom and self.custom_path or self.default_path
+  local family = use_custom and self.custom_family or self.default_family
+  local opened, result, open_error = pcall(self.module.open, path)
+  if opened and result then
+    self.ready = true
+    self.error = ""
+    self.font_path = path
+    self.family = family
+    self.source = use_custom and "uploaded" or "default"
+    self.match = use_custom
+    if use_custom then
+      self.selection = "matched " .. tostring(matched_family)
+    elseif wanted == "" then
+      self.selection = "no uploaded font"
+    elseif #self.requested_families == 0 then
+      self.selection = "layout has no font family"
+    else
+      self.selection = "uploaded family not requested"
+    end
+    return true
+  end
+
+  if use_custom then
+    local fallback_opened, fallback_result, fallback_error = pcall(self.module.open, self.default_path)
+    if fallback_opened and fallback_result then
+      self.ready = true
+      self.error = ""
+      self.font_path = self.default_path
+      self.family = self.default_family
+      self.source = "default"
+      self.match = false
+      self.selection = "uploaded font failed; bundled fallback"
+      self.selection_error = "uploaded font load failed: " .. tostring(open_error or result)
+      return true, self.selection_error
+    end
+    open_error = tostring(open_error or result) .. "; fallback: "
+      .. tostring(fallback_error or fallback_result)
+  end
+
+  self.ready = false
+  self.match = false
+  self.error = "vector font load failed: " .. tostring(open_error or result)
+  self.selection_error = self.error
+  return false, self.error
 end
 
 function VectorFont:render(text, width, height, text_style, background, chroma, opaque)
@@ -214,12 +345,17 @@ end
 function VectorFont:stats()
   local base = {
     family = self.family,
+    path = self.font_path,
+    source = self.source,
+    match = self.match,
+    selection = self.selection,
+    requested_families = table.concat(self.requested_families or {}, ", "),
     engine = self.ready and "stb_truetype" or "firmware fallback",
     loaded = self.ready,
     surface_ready = self.surface_ready,
     layered_surface = self.layered_surface,
     subpixel = self.subpixel_order,
-    error = self.error,
+    error = self.error ~= "" and self.error or self.selection_error,
   }
   if self.ready and self.module and type(self.module.stats) == "function" then
     local ok, stats = pcall(self.module.stats)

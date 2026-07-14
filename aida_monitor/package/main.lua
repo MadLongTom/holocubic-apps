@@ -177,6 +177,8 @@ fetch_layout = function(reason)
     end
     if state.client then state.client:stop() state.client = nil end
     if state.renderer then state.renderer:destroy() state.renderer = nil end
+    local font_ok, font_err = state.vector_font:select_for_layout(model, config)
+    if not font_ok then log("font selection", tostring(font_err)) end
     local renderer = Renderer.new({
       config = config,
       layout = model,
@@ -225,6 +227,11 @@ function state.snapshot()
     font_cache_entries = render.font_cache_entries or 0,
     font_renders = render.font_renders or 0,
     font_missing_glyphs = render.font_missing_glyphs or 0,
+    font_source = render.font_source or "default",
+    font_match = render.font_match == true,
+    font_selection = render.font_selection or "",
+    font_requested_families = render.font_requested_families or "",
+    font_path = render.font_path or tostring(config.vector_font_default_path or config.vector_font_path or ""),
     internal_free = render.internal_free or 0,
     psram_free = render.psram_free or 0,
     psram_largest = render.psram_largest or 0,
@@ -295,10 +302,11 @@ _G.__aida_monitor = state
 show_message("AIDA REMOTESENSOR", "Starting...", 0x49B6FF)
 
 if AidaWeb and AidaWeb.new then
+  local web_route_base = (app and app.route_base and app.route_base()) or "/aida_monitor"
   state.web = AidaWeb.new({
     config = config,
     config_path = APP_DIR .. "/config.lua",
-    route_base = (app and app.route_base and app.route_base()) or "/aida_monitor",
+    route_base = web_route_base,
     restart = function() return state.restart_client() end,
     state = function() return state.snapshot() end,
   })
